@@ -69,7 +69,6 @@ object LogisticRegression {
             Annotation(n - nCalled, Annotation.empty, Annotation.empty, Annotation.empty, Annotation.empty, 0, Annotation.empty, Annotation.empty)
           else {
             val gtMean = gtSum.toDouble / nCalled
-
             val gtArray = gs.map(_.gt.map(_.toDouble).getOrElse(gtMean)).toArray
 
             val X = DenseMatrix.horzcat(new DenseMatrix(n, 1, gtArray), covAndOnesBc.value) // FIXME: make more efficient

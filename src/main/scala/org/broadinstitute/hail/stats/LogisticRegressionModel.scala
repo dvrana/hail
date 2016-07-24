@@ -45,17 +45,15 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
       score = X.t * (mu - y) // check sign
       fisher = X.t * (X(::, *) :* (mu :* (1d - mu))) // would mu.map(x => x * (1 - x)) be faster?
 
-//      alternative algorithm avoids both mult by X.t and direct inversion
-//      val qrRes = qr.reduced(diag(sqrt(mu :* (1d - mu))) * X)
-//      solve qrRes.R * bDiff = qrRes.Q.t * (y - mu) with R upper triangular
-//      return diagonal of inverse as well, which is diagonal of inv(R)^T * inv(R)
-
 //      println(s"b = $b")
 //      println(s"mu = $mu")
 //      println(s"score = $score")
 //      println(s"fisher = $fisher")
 
-      // catch singular here ... need to recognize when singular implies fit versus other issues
+      //      alternative algorithm avoids both mult by X.t and direct inversion
+      //      val qrRes = qr.reduced(diag(sqrt(mu :* (1d - mu))) * X)
+      //      solve qrRes.R * bDiff = qrRes.Q.t * (y - mu) with R upper triangular
+      //      return diagonal of inverse as well, which is diagonal of inv(R)^T * inv(R)
 
       try {
         val bDiff = fisher \ score // could also return bDiff if last adjustment improves Wald accuracy. Conceptually better to have b, mu, and fisher correspond.
@@ -73,7 +71,6 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
     LogisticRegressionFit(b, mu, fisher, converged, exploded, iter)
   }
 
-  // could start from mu
   // one chiSqDist per partition
   def scoreTest(b: DenseVector[Double], chiSqDist: ChiSquaredDistribution): ScoreStat = {
     require(X.cols == b.length)
