@@ -8,10 +8,6 @@ import org.broadinstitute.hail.expr._
 import org.broadinstitute.hail.stats.LogisticRegressionModel
 import org.broadinstitute.hail.variant._
 
-case class LogRegStats(nMissing: Int, beta: Double, se: Double, t: Double, p: Double, nIter: Int, converged: Boolean, exploded: Boolean) {
-  def toAnnotation: Annotation = Annotation(nMissing, beta, se, t, p, nIter, converged, exploded)
-}
-
 object LogisticRegression {
   def name = "LogisticRegression"
 

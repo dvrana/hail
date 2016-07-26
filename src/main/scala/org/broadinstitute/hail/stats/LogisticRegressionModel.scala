@@ -42,18 +42,24 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
       iter += 1
 
       mu = sigmoid(X * b)
-      score = X.t * (mu - y) // check sign
-      fisher = X.t * (X(::, *) :* (mu :* (1d - mu))) // would mu.map(x => x * (1 - x)) be faster?
+      score = X.t * (y - mu)
+      fisher = X.t * (X(::, *) :* (mu :* (1d - mu))) // would mu.map(x => x * (1 - x)) be faster? this is actually -fisher
 
-//      println(s"b = $b")
-//      println(s"mu = $mu")
-//      println(s"score = $score")
-//      println(s"fisher = $fisher")
+      // for debugging:
+      // println(s"b = $b")
+      // println(s"mu = $mu")
+      // println(s"score = $score")
+      // println(s"fisher = $fisher")
 
-      //      alternative algorithm avoids both mult by X.t and direct inversion
-      //      val qrRes = qr.reduced(diag(sqrt(mu :* (1d - mu))) * X)
-      //      solve qrRes.R * bDiff = qrRes.Q.t * (y - mu) with R upper triangular
-      //      return diagonal of inverse as well, which is diagonal of inv(R)^T * inv(R)
+      // alternative algorithm avoids both mult by X.t and direct inversion, clearly better for Firth
+      // val sqrtW = sqrt(mu :* (1d - mu))
+      // val qrFact = qr.reduced(X(::, *) :* sqrtW)
+      // solve qrFact.R * bDiff = qrFact.Q.t * (y - mu) with R upper triangular
+
+      // for Wald: return diagonal of inverse as well, which is diagonal of inv(R)^T * inv(R)
+      // for Firth, modify score using:
+      // val QQ = qrFact.Q :* qrFact.Q
+      // val h = sum(QQ(*, ::))
 
       try {
         val bDiff = fisher \ score // could also return bDiff if last adjustment improves Wald accuracy. Conceptually better to have b, mu, and fisher correspond.
@@ -61,25 +67,24 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
         if (norm(bDiff) < tol)
           converged = true
         else
-          b -= bDiff
+          b += bDiff
       }
       catch {
         case e: breeze.linalg.MatrixSingularException => exploded = true
       }
     }
 
-    LogisticRegressionFit(b, mu, fisher, converged, exploded, iter)
+    LogisticRegressionFit(b, mu, fisher, iter, converged, exploded)
   }
 
-  // one chiSqDist per partition
   def scoreTest(b: DenseVector[Double], chiSqDist: ChiSquaredDistribution): ScoreStat = {
     require(X.cols == b.length)
 
     val mu = sigmoid(X * b)
-    val y0 = X.t * (y - mu)
-    val chi2 = y0 dot ((X.t * (X(::, *) :* (mu :* (1d - mu)))) \ y0)
+    val score = X.t * (y - mu)
+    val chi2 = score dot ((X.t * (X(::, *) :* (mu :* (1d - mu)))) \ score) // score.t * inv(X.t W X) * score
 
-    //alternative approach using QR:
+    //alternative using QR:
     //val sqrtW = sqrt(mu :* (1d - mu))
     //val Qty0 = qr.reduced.justQ(X(::, *) :* sqrtW).t * ((y - mu) :/ sqrtW)
     //val chi2 = Qty0 dot Qty0  // better to create normSq Ufunc
@@ -94,9 +99,9 @@ case class LogisticRegressionFit(
   b: DenseVector[Double],
   mu: DenseVector[Double],
   fisher: DenseMatrix[Double],
+  nIter: Int,
   converged: Boolean,
-  exploded: Boolean,
-  nIter: Int) {
+  exploded: Boolean) {
 
   def loglk(y: DenseVector[Double]): Double = sum(log((y :* mu) + ((1d - y) :* (1d - mu))))
 
@@ -110,7 +115,6 @@ case class LogisticRegressionFit(
     WaldStat(b, se, z, p)
   }
 
-  // one chiSqDist per partition
   def likelihoodRatioTest(y: DenseVector[Double], loglk0: Double, chiSqDist: ChiSquaredDistribution): LikelihoodRatioStat = {
     val chi2 = 2 * (loglk(y) - loglk0)
     val p = 1d - chiSqDist.cumulativeProbability(chi2)
