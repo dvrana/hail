@@ -9,7 +9,7 @@ import org.broadinstitute.hail.expr._
 import scala.collection.mutable
 
 object GlobalTableAnnotator extends TSVAnnotator {
-  def apply(filename: String, hConf: hadoop.conf.Configuration, declaredSig: Map[String, Type], missing: String,
+  def  apply(filename: String, hConf: hadoop.conf.Configuration, declaredSig: Map[String, Type], missing: String,
     delim: String): (IndexedSeq[Annotation], Type) = {
     readLines(filename, hConf) { lines =>
       if (lines.isEmpty)

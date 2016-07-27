@@ -18,13 +18,20 @@ import org.apache.commons.math3.distribution.ChiSquaredDistribution
 import org.broadinstitute.hail.expr.{TBoolean, TDouble, TInt, TStruct, Type}
 import org.apache.commons.math3.special._
 import org.apache.commons.math3.optim.univariate.SearchInterval
-import org.broadinstitute.hail.methods.{LinRegStats, LinearRegression}
+import org.apache.spark.HashPartitioner
+import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
+import org.broadinstitute.hail.methods.{LinRegStats, LinearRegression, Phasing}
+import org.broadinstitute.hail.utils.{SparseVariantSampleMatrix, SparseVariantSampleMatrixRRDBuilder}
+
+import scala.collection.mutable
+import scala.collection.mutable.ArrayBuffer
 
 
 
 /**
   * Created by mitja on 7/22/16.
   */
+
 
 object RAFT extends Command {
 
@@ -63,6 +70,7 @@ object RAFT extends Command {
     val var_rdd = vds.aggregateByVariantWithAll( new RaftCounter) ( {
       case (counter, v,va, s, sa, g ) => {
         val is_case = pheno_query(sa)
+
         counter.consume_geno(g, is_case)
       }
     }, { case (r1, r2) => r1.merge(r2)
@@ -72,6 +80,57 @@ object RAFT extends Command {
     return var_rdd
   }
 
+
+  def calcRAFT_by_annotation(state:State, pheno:String, annot:String, n_partitions:Int=200 ): RDD[(String,RaftAnnotationCounter) ] = {
+
+    val vds = state.vds
+
+    val (base_type,pheno_query) = vds.querySA(pheno)
+    val (va_type,va_query) = vds.queryVA(annot)
+
+    val partitioner = new HashPartitioner(n_partitions)
+
+    info("Counting by anno " + annot)
+    val samplesPhenos = state.sc.broadcast(for (i <- state.vds.sampleIds.indices) yield {
+        pheno_query(state.vds.sampleAnnotations(i))
+        }
+    )
+
+    //Array(pheno)
+
+    SparseVariantSampleMatrixRRDBuilder.buildByVA(  vds, state.sc,   partitioner ) ( {
+        case(v, va) =>  {
+          info("MAPPING ANNOTATION")
+          val anno = va_query(va).get.toString()
+          info("printing anno")
+        }
+      }).map( {
+      case( anno, svm) =>
+        {
+          (anno.toString, new RaftAnnotationCounter(anno.toString, svm, pheno))
+        }
+    })
+
+
+    /*
+    val val_rdd = vds.aggregateByAnnotation( new RaftAnnotationCounter() ) ( {
+
+      case (rcounter, v, va, sampleid, sa, sample_indx, g) => {
+        val one =1
+        return Unit
+      }
+    }, {
+      case( counter1,counter2) => counter1.merge(counter2)
+    }, {
+      case( v, va) =>  va_query(va)
+    }
+    )
+    */
+
+  }
+
+
+
   def run(state: State, options: Options): State = {
 
     //vds.rdd.map  { case (v,va,gs)  => gs.iterator.zip(bc.value.iterator).foldLeft(  ) }
@@ -79,24 +138,26 @@ object RAFT extends Command {
 
     val group_by = options.group_by
 
-    info(s"Running RAFT for phenotype " + pheno + " with " + state.vds.nSamples + " samples and " + state.vds.nVariants + " variants.")
-
     //val phenos = get_phenotypes(state, pheno)
 
     val output = options.output
 
-  // why is this TBoolean not found even imported?
+  // why is this TBoolean not found even if imported?
     // state.vds.saSignature.getAsOption[ TBoolean ](pheno) match {
 
+
+
+/*
     state.vds.saSignature.getOption(pheno) match {
       case None => {
         println("You need to have sample annotation with the given name " + pheno + " and type Boolean prior to running RAFT")
         throw new IllegalArgumentException("You need to have sample annotation with the given name " + pheno + " and type Boolean prior to running RAFT")
       }
     }
+  */
 
-
-    if (group_by!=None) {
+    /*
+    if ( group_by != null ) {
       state.vds.vaSignature.getOption(group_by) match {
         case None => {
           println("You need to have variant annotation with the given name " + group_by + " for the variants to be grouped by prior to running RAFT with group_by option")
@@ -104,49 +165,153 @@ object RAFT extends Command {
         }
       }
     }
+    */
+
+    //val (base_type,pheno_query) = state.vds.querySA(pheno)
+
+    if ( group_by == null ) {
 
 
-    val (base_type,pheno_query) = state.vds.querySA(pheno)
+      info(s"Running single variant RAFT for phenotype " + pheno + " with " + state.vds.nSamples + " samples and " + state.vds.nVariants + " variants.")
+      val resRDD = calcRAFT(state, pheno)
 
-    val resRDD = calcRAFT(state, pheno)
+      if (output != null) {
+        hadoopDelete(output, state.hadoopConf, recursive = true)
+        resRDD.map { case (v, raft_stat) =>
+          val sb = new StringBuilder()
+          sb.append(v.contig)
+          sb += '\t'
+          sb.append(v.start)
+          sb += '\t'
+          sb.append(v.ref)
+          sb += '\t'
+          sb.append(v.alt)
+          sb += '\t'
+          raft_stat.result_string(sb)
+          sb.result()
+        }.writeTable(output, Some("Chrom\tPos\tRef\tAlt\t" + RaftCounter.header))
+      }
 
-    if (output != null) {
-      hadoopDelete(output, state.hadoopConf, recursive = true)
-      resRDD.map { case (v, raft_stat) =>
-        val sb = new StringBuilder()
-        sb.append(v.contig)
-        sb += '\t'
-        sb.append(v.start)
-        sb += '\t'
-        sb.append(v.ref)
-        sb += '\t'
-        sb.append(v.alt)
-        sb += '\t'
-        raft_stat.result_string(sb)
-        sb.result()
-      }.writeTable(output, Some("Chrom\tPos\tRef\tAlt\t" + RaftCounter.header))
+      val vds = state.vds
+
+      val (newVAS, inserter) = vds.insertVA(RaftCounter.signature, "raft")
+
+      val newstate = state.copy(
+        vds = vds.copy(
+          rdd = vds.rdd.zipPartitions(resRDD) { case (it, jt) =>
+
+            it.zip(jt).map { case ((v, va, gs), (v2, comb)) =>
+              assert(v == v2)
+
+              (v, inserter(va, comb.toAnnotation), gs)
+            }
+          },
+          vaSignature = newVAS
+        )
+      )
+
+      val sb = new StringBuilder()
+      newVAS.pretty(sb, 1)
+      print(sb)
+
+      return newstate
+    }
+    else
+    {
+      info(s"Running RAFT by annotation " + group_by+ " for phenotype " + pheno + " with " + state.vds.nSamples + " samples and " + state.vds.nVariants + " variants.")
+      val resRDD = calcRAFT_by_annotation( state, pheno, group_by)
+      return state
     }
 
-  val vds = state.vds
+  }
 
-  val (newVAS, inserter) = vds.insertVA( RaftCounter.signature, "raft" )
+}
 
-  val newstate = state.copy(
-    vds = vds.copy(
-      rdd = vds.rdd.zipPartitions(resRDD) {  case (it, jt) =>
 
-        it.zip(jt).map{  case ((v, va, gs), (v2, comb)) =>
-            assert(v == v2)
+class RaftAnnotationCounter( annot: String, svm:SparseVariantSampleMatrix, pheno: String ) {
 
-            (v, inserter(va, comb.toAnnotation), gs)
+
+  var n_cases: Int = 0
+  var n_controls: Int = 0
+  var n_missing_pheno: Int = 0
+
+
+  info("raft counter for " + annot)
+
+  private val phaseCache = mutable.Map[(String,String),Option[Double]]()
+
+  // holds mapping from sample id to list of variant ids the sample carries (either homozygotes, or compound hets)
+  var homvars =  Map[ String, ArrayBuffer[String] ]().withDefaultValue( new ArrayBuffer[String])
+
+  svm.mapSamples( {
+
+    case( sample_id, sample_idx, variant_idxs, genotypes ) => {
+        val phenotype = svm.getSampleAnnotation(sample_id, pheno)
+
+        print("sample anno of " + sample_id + " is " + phenotype)
+        phenotype match {
+          case Some(true) => n_cases+=1
+          case Some(false) => n_controls+=1
+          case None => n_missing_pheno+=1
+        }
+
+        val hetSites = new ArrayBuffer[Int]
+
+        variant_idxs.indices.foreach({
+          i =>
+          val vi = variant_idxs(i)
+
+          genotypes(i) match{
+            case 1 =>
+              hetSites += vi
+
+            case 2 =>
+              homvars( sample_id) += svm.variants( vi )
+
+            case _ =>
           }
-      },
-      vaSignature = newVAS
-    )
-   )
+        })
 
-  return newstate
+        hetSites.indices.foreach( {
+          i1 =>
+            val v1i = hetSites(i1)
+            Range(i1 + 1, hetSites.size).foreach({
+              i2 =>
+                val v2i = hetSites(i2)
 
+                val var1 = svm.variants(v1i)
+                val var2 = svm.variants(v2i)
+
+                getPhase( var1, var1 ) match {
+                  case Some(p_same_hap) =>
+                    if( p_same_hap < 0.5 ) {
+                      val comp_var_name = if (var1 < var2) var1 + "|" + var2 else var2 + "|" + var1
+                      homvars( sample_id) += comp_var_name
+                    }
+                }
+            }
+            )
+        }
+        )
+
+
+
+    }
+
+  })
+
+  private def getPhase(v1: String, v2: String) : Option[Double] = {
+    phaseCache.get((v1,v2)) match{
+      case Some(p) => p
+      case None =>
+        val pPhase = Phasing.probOnSameHaplotypeWithEM(svm.getGenotypeCounts(v1,v2))
+        phaseCache.update((v1,v2),pPhase)
+        pPhase
+    }
+  }
+
+  def count_variants() {
+    val first =1
   }
 
 }
@@ -184,7 +349,6 @@ object RaftCounter {
 
 
 }
-
 
 class RaftCounter {
 
@@ -315,29 +479,6 @@ class RaftCounter {
 
     return this
   }
-
-  def log_likelihood( genoRR:Float, nCaseHom: Int, nCases:Int, nCtrlHom:Int, nCtrl:Int, pHomozygote:Float, diseasePrevalence:Float, nullModel:Boolean=false): Double  = {
-
-    val alleleFreq = math.sqrt(pHomozygote)
-    var FStat = ((nCtrlHom / nCtrl.toFloat) - pHomozygote) / ( alleleFreq - pHomozygote )
-
-    if (FStat < 0) FStat=0
-
-    val corrPrHom = FStat * alleleFreq + (1- FStat) * pHomozygote
-    val denom = ( 1- pHomozygote) + genoRR * corrPrHom
-    val x = diseasePrevalence / denom
-
-    var pHomCase=corrPrHom
-    var pHomControl=corrPrHom
-
-    if (!nullModel) {
-      pHomCase= genoRR * corrPrHom / denom
-      pHomControl = (1- genoRR *x ) * corrPrHom / (1-diseasePrevalence)
-    }
-
-    math.log(pHomCase) * nCaseHom + math.log(pHomControl) * nCtrlHom + math.log(1-pHomControl) * (nCtrl-nCtrlHom) + math.log(1-pHomCase) * (nCases-nCaseHom)
-  }
-
 
   def result_string(sb: StringBuilder) = {
 
