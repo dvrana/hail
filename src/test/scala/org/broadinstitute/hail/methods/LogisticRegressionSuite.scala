@@ -30,7 +30,7 @@ class LogisticRegressionSuite extends SparkSuite {
 
     s = LogisticRegressionCommand.run(s, Array(
       "-y", "sa.pheno.isCase",
-      "-c", "sa.cov.Cov1, sa.cov.Cov2 + 1 - 1"))
+      "-c", "sa.cov.Cov1, sa.cov.Cov2"))
 
     val v1 = Variant("1", 1, "C", "T")   // x = (0, 1, 0, 0, 0, 1, 0, 0, 0, 0)
     val v2 = Variant("1", 2, "C", "T")   // x = (., 2, ., 2, 0, 0, 0, 0, 0, 0)
@@ -41,7 +41,6 @@ class LogisticRegressionSuite extends SparkSuite {
     val v9 = Variant("1", 9, "C", "T")   // x = (., 1, 1, 1, 1, 1, 0, 0, 0, 0)
     val v10 = Variant("1", 10, "C", "T") // x = (., 2, 2, 2, 2, 2, 0, 0, 0, 0)
 
-    val qMissing = s.vds.queryVA("va.logreg.nMissing")._2
     val qBeta = s.vds.queryVA("va.logreg.beta")._2
     val qSe = s.vds.queryVA("va.logreg.se")._2
     val qZstat = s.vds.queryVA("va.logreg.zstat")._2
@@ -64,6 +63,8 @@ class LogisticRegressionSuite extends SparkSuite {
 
     def assertNotConverged(v: Variant) = assert(!qConverged(annotationMap(v)).get.asInstanceOf[Boolean])
 
+    def assertConstant(v: Variant) = assert(qConverged(annotationMap(v)).isEmpty)
+
     /*
     comparing to output of R code:
     x = c(0, 1, 0, 0, 0, 1, 0, 0, 0, 0)
@@ -75,7 +76,6 @@ class LogisticRegressionSuite extends SparkSuite {
     summary(logfit)["coefficients"]
     */
 
-    assertInt(qMissing, v1, 0)
     assertDouble(qBeta, v1, -0.81226793796)
     assertDouble(qSe, v1, 2.1085483421)
     assertDouble(qZstat, v1, -0.3852261396)
@@ -86,7 +86,6 @@ class LogisticRegressionSuite extends SparkSuite {
     x = c(.5, 2, .5, 2, 0, 0, 0, 0, 0, 0)
     */
 
-    assertInt(qMissing, v2, 2)
     assertDouble(qBeta, v2, -0.43659460858)
     assertDouble(qSe, v2, 1.0296902941)
     assertDouble(qZstat, v2, -0.4240057531)
@@ -102,11 +101,11 @@ class LogisticRegressionSuite extends SparkSuite {
     assertNotConverged(v3)
 
     // these all have constant genotypes after imputation
-    assertInt(qNIter, v6, 0)
-    assertInt(qNIter, v7, 0)
-    assertInt(qNIter, v8, 0)
-    assertInt(qNIter, v9, 0)
-    assertInt(qNIter, v10, 0)
+    assertConstant(v6)
+    assertConstant(v7)
+    assertConstant(v8)
+    assertConstant(v9)
+    assertConstant(v10)
   }
 
   /*

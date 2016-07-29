@@ -4,7 +4,8 @@ import breeze.linalg.{DenseMatrix, DenseVector}
 import org.broadinstitute.hail.Utils._
 import org.broadinstitute.hail.annotations.Annotation
 import org.broadinstitute.hail.expr._
-import org.broadinstitute.hail.methods.{LogRegStats, LogisticRegression}
+import org.broadinstitute.hail.methods.LogisticRegression
+import org.broadinstitute.hail.stats.LogisticRegressionModel
 import org.kohsuke.args4j.{Option => Args4jOption}
 
 object LogisticRegressionCommand extends Command {
@@ -98,7 +99,7 @@ object LogisticRegressionCommand extends Command {
 
     val logreg = LogisticRegression(vdsForCompleteSamples, y, cov)
 
-    val (newVAS, inserter) = vdsForCompleteSamples.insertVA(LogisticRegression.`type`, pathVA)
+    val (newVAS, inserter) = vdsForCompleteSamples.insertVA(LogisticRegressionModel.waldType, pathVA)
 
     state.copy(
       vds = vds.copy(

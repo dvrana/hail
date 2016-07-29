@@ -4,14 +4,40 @@ import breeze.linalg._
 import breeze.numerics._
 import org.apache.commons.math3.distribution.ChiSquaredDistribution
 
+import org.broadinstitute.hail.annotations.Annotation
+import org.broadinstitute.hail.expr._
+
+object LogisticRegressionModel {
+
+  def `waldType`: Type = TStruct(
+    ("beta", TDouble),
+    ("se", TDouble),
+    ("zstat", TDouble),
+    ("pval", TDouble),
+    ("nIter", TInt),
+    ("converged", TBoolean),
+    ("exploded", TBoolean))
+
+  def `likelihoodRatioType`: Type = TStruct(
+    ("beta", TDouble),
+    ("chi2", TDouble),
+    ("pval", TDouble),
+    ("nIter", TInt),
+    ("converged", TBoolean),
+    ("exploded", TBoolean))
+
+  def `scoreType`: Type = TStruct(
+    ("chi2", TDouble),
+    ("pval", TDouble))
+}
+
 class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
   require(y.length == X.rows)
+  require(y.forall(yi => yi >= 0 && yi <= 1))
+  require(sum(y) > 0 && sum(y) < y.length)
 
   val n = X.rows
   val m = X.cols
-
-  //move to stat utils?
-  def logodds(x: Double): Double = math.log(x / (1 - x))
 
   //possibly remove once handled by general case
   def loglkInterceptOnly(): Double = {
@@ -19,10 +45,11 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
     sum(log(y * avg + (1d - y) * (1d - avg)))
   }
 
-  def bInterceptOnly(): DenseVector[Double] = {
-    val b0 = DenseVector.zeros[Double](m)
-    b0(0) = logodds(sum(y) / n)
-    b0
+  def bInterceptOnly(interceptCol: Int = 0): DenseVector[Double] = {
+    val b = DenseVector.zeros[Double](m)
+    val avg = sum(y) / n
+    b(interceptCol) = math.log(avg / (1 - avg))
+    b
   }
 
   // intended per variant, starting from fit without genotype
@@ -43,7 +70,7 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
 
       mu = sigmoid(X * b)
       score = X.t * (y - mu)
-      fisher = X.t * (X(::, *) :* (mu :* (1d - mu))) // would mu.map(x => x * (1 - x)) be faster? this is actually -fisher
+      fisher = X.t * (X(::, *) :* (mu :* (1d - mu))) // would mu.map(x => x * (1 - x)) be faster?
 
       // for debugging:
       // println(s"b = $b")
@@ -77,21 +104,33 @@ class LogisticRegressionModel(X: DenseMatrix[Double], y: DenseVector[Double]) {
     LogisticRegressionFit(b, mu, fisher, iter, converged, exploded)
   }
 
-  def scoreTest(b: DenseVector[Double], chiSqDist: ChiSquaredDistribution): ScoreStat = {
+  def scoreTest(b: DenseVector[Double], chiSqDist: ChiSquaredDistribution): Option[ScoreStat] = {
     require(X.cols == b.length)
 
     val mu = sigmoid(X * b)
     val score = X.t * (y - mu)
-    val chi2 = score dot ((X.t * (X(::, *) :* (mu :* (1d - mu)))) \ score) // score.t * inv(X.t W X) * score
 
-    //alternative using QR:
-    //val sqrtW = sqrt(mu :* (1d - mu))
-    //val Qty0 = qr.reduced.justQ(X(::, *) :* sqrtW).t * ((y - mu) :/ sqrtW)
-    //val chi2 = Qty0 dot Qty0  // better to create normSq Ufunc
+    try {
+      val chi2 = score dot ((X.t * (X(::, *) :* (mu :* (1d - mu)))) \ score) // score.t * inv(X.t W X) * score
 
-    val p = 1d - chiSqDist.cumulativeProbability(chi2)
+      //alternative using QR:
+      //val sqrtW = sqrt(mu :* (1d - mu))
+      //val Qty0 = qr.reduced.justQ(X(::, *) :* sqrtW).t * ((y - mu) :/ sqrtW)
+      //val chi2 = Qty0 dot Qty0  // better to create normSq Ufunc
 
-    ScoreStat(chi2, p)
+      val p = 1d - chiSqDist.cumulativeProbability(chi2)
+
+      Some(ScoreStat(chi2, p))
+    }
+    catch {
+      case e: breeze.linalg.MatrixSingularException => None
+    }
+  }
+
+  def toAnnotation(scoreStat: Option[ScoreStat]): Annotation = {
+    scoreStat
+      .map(s => Annotation(s.chi2, s.p))
+      .getOrElse(Annotation.empty)
   }
 }
 
@@ -105,22 +144,48 @@ case class LogisticRegressionFit(
 
   def loglk(y: DenseVector[Double]): Double = sum(log((y :* mu) + ((1d - y) :* (1d - mu))))
 
-  def waldTest(): WaldStat = {
-    // need separate catch if we invert here rather than passing through
-    val se = sqrt(diag(inv(fisher))) // breeze uses LU to invert, dgetri...for Wald, better to pass through from fit?  if just gt, can solve fisher \ (1,0,...,0) or use schur complement
-    val z = b :/ se
-    val sqrt2 = math.sqrt(2)
-    val p = z.map(zi => 1 + erf(-abs(zi) / sqrt2))
+  def waldTest(): Option[WaldStat] = {
+    if (converged) {
+      try {
+        val se = sqrt(diag(inv(fisher))) // breeze uses LU to invert, dgetri...for Wald, better to pass through from fit? if just gt, can solve fisher \ (1,0,...,0) or use schur complement
 
-    WaldStat(b, se, z, p)
+        val z = b :/ se
+        val sqrt2 = math.sqrt(2)
+        val p = z.map(zi => 1 + erf(-abs(zi) / sqrt2))
+
+        Some(WaldStat(b, se, z, p))
+      }
+      catch {
+        case e: breeze.linalg.MatrixSingularException => None
+      }
+    }
+    else
+      None
   }
 
-  def likelihoodRatioTest(y: DenseVector[Double], loglk0: Double, chiSqDist: ChiSquaredDistribution): LikelihoodRatioStat = {
-    val chi2 = 2 * (loglk(y) - loglk0)
-    val p = 1d - chiSqDist.cumulativeProbability(chi2)
+  def likelihoodRatioTest(y: DenseVector[Double], loglk0: Double, chiSqDist: ChiSquaredDistribution): Option[LikelihoodRatioStat] = {
+    if (converged) {
+      val chi2 = 2 * (loglk(y) - loglk0)
+      val p = 1d - chiSqDist.cumulativeProbability(chi2)
 
-    LikelihoodRatioStat(b, chi2, p)
+      Some(LikelihoodRatioStat(b, chi2, p)
+      )
+    }
+    else
+      None
   }
+
+  def toAnnotation(waldStat: Option[WaldStat]): Annotation =
+    waldStat
+      .map(s => Annotation(s.b(0), s.se(0), s.z(0), s.p(0), nIter, converged, exploded))
+      .getOrElse(
+        Annotation(Annotation.empty, Annotation.empty, Annotation.empty, Annotation.empty, nIter, converged, exploded))
+
+  def likelihoodRatioAnnotation(lrStat: Option[LikelihoodRatioStat]): Annotation =
+    lrStat
+      .map(s => Annotation(s.b(0), s.chi2: Double, s.p: Double, nIter, converged, exploded))
+      .getOrElse(
+        Annotation(Annotation.empty, Annotation.empty, Annotation.empty, nIter, converged, exploded))
 }
 
 case class WaldStat(b: DenseVector[Double], se: DenseVector[Double], z: DenseVector[Double], p: DenseVector[Double])

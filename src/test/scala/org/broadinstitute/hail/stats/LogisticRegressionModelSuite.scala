@@ -30,16 +30,16 @@ class LogisticRegressionModelSuite extends TestNGSuite {
 
     val model = new LogisticRegressionModel(X,y)
     val fit = model.fit()
-    val waldStat = fit.waldTest()
+    val waldStat = fit.waldTest().get
 
     val b0 = model.bInterceptOnly()
     val loglk0 = model.loglkInterceptOnly()
 
     val chiSqDist = new ChiSquaredDistribution(X.cols - 1)
-    val scoreStat = model.scoreTest(b0, chiSqDist)
+    val scoreStat = model.scoreTest(b0, chiSqDist).get
 
     val loglk = fit.loglk(y)
-    val lrStat = fit.likelihoodRatioTest(y, loglk0, chiSqDist)
+    val lrStat = fit.likelihoodRatioTest(y, loglk0, chiSqDist).get
 
     assert(D_==(waldStat.b(0), 0.7245034, tolerance = 1.0E-6))
     assert(D_==(waldStat.b(1), -0.3585773, tolerance = 1.0E-6))
@@ -62,6 +62,7 @@ class LogisticRegressionModelSuite extends TestNGSuite {
     assert(D_==(lrStat.chi2, 0.351536062, tolerance = 1.0E-6))
     assert(D_==(lrStat.p, 0.8388125392, tolerance = 1.0E-5))
 
+    // using logistf
     assert(D_==(scoreStat.chi2, 0.346648, tolerance = 1.0E-5))
     assert(D_==(scoreStat.p, 0.8408652791, tolerance = 1.0E-5))
   }
@@ -102,37 +103,36 @@ class LogisticRegressionModelSuite extends TestNGSuite {
 
     val chiSqDist = new ChiSquaredDistribution(1)
 
-    val waldStat = fit.waldTest()
-    val scoreStat = model.scoreTest(b0, chiSqDist)
-    val lrStat = fit.likelihoodRatioTest(y, loglk0, chiSqDist)
+    val waldStat = fit.waldTest().get
+    val scoreStat = model.scoreTest(b0, chiSqDist).get
+    val lrStat = fit.likelihoodRatioTest(y, loglk0, chiSqDist).get
 
-//    println(waldStat)
-
+    //println(waldStat)
     assert(D_==(waldStat.b(0), 3.1775729, tolerance = 1.0E-6))
     assert(D_==(waldStat.b(1), -0.4811418, tolerance = 1.0E-6))
     assert(D_==(waldStat.b(2), -0.4293547, tolerance = 1.0E-6))
     assert(D_==(waldStat.b(3), -0.4214875, tolerance = 1.0E-6))
 
-    // loss of precision here relative to R... 4.10942073414 ???
-    assert(D_==(waldStat.se(0), 4.1093314, tolerance = 1.0E-4))
-    assert(D_==(waldStat.se(1), 1.6203512, tolerance = 1.0E-4))
-    assert(D_==(waldStat.se(2), 0.7256555, tolerance = 1.0E-4))
-    assert(D_==(waldStat.se(3), 0.9223513, tolerance = 1.0E-4))
+    //loss of precision here relative to R... 4.10942073414 ???
+    assert(D_==(waldStat.se(0), 4.1094207, tolerance = 1.0E-6))
+    assert(D_==(waldStat.se(1), 1.6203668, tolerance = 1.0E-6))
+    assert(D_==(waldStat.se(2), 0.7256665, tolerance = 1.0E-6))
+    assert(D_==(waldStat.se(3), 0.9223569, tolerance = 1.0E-6))
 
-    assert(D_==(waldStat.z(0), 0.7732579, tolerance = 1.0E-4))
-    assert(D_==(waldStat.z(1), -0.2969367, tolerance = 1.0E-4))
-    assert(D_==(waldStat.z(2), -0.5916785, tolerance = 1.0E-4))
-    assert(D_==(waldStat.z(3), -0.4569707, tolerance = 1.0E-4))
+    assert(D_==(waldStat.z(0), 0.7732411, tolerance = 1.0E-6))
+    assert(D_==(waldStat.z(1), -0.2969339, tolerance = 1.0E-6))
+    assert(D_==(waldStat.z(2), -0.5916695, tolerance = 1.0E-6))
+    assert(D_==(waldStat.z(3), -0.4569679, tolerance = 1.0E-6))
 
-    assert(D_==(waldStat.p(0), 0.4393698, tolerance = 1.0E-4))
-    assert(D_==(waldStat.p(1), 0.7665148, tolerance = 1.0E-4))
-    assert(D_==(waldStat.p(2), 0.5540659, tolerance = 1.0E-4))
-    assert(D_==(waldStat.p(3), 0.6476921, tolerance = 1.0E-4))
+    assert(D_==(waldStat.p(0), 0.4393797, tolerance = 1.0E-6))
+    assert(D_==(waldStat.p(1), 0.7665170, tolerance = 1.0E-6))
+    assert(D_==(waldStat.p(2), 0.5540720, tolerance = 1.0E-6))
+    assert(D_==(waldStat.p(3), 0.6476941, tolerance = 1.0E-6))
 
-    assert(D_==(loglk0, -3.6433170,tolerance = 1.0E-6))
+    assert(D_==(loglk0, -3.643316979,tolerance = 1.0E-6))
     assert(D_==(loglk, -3.2066547, tolerance = 1.0E-6))
     assert(D_==(lrStat.chi2, 0.8733246, tolerance = 1.0E-6))
-    assert(D_==(lrStat.p, 0.35003656, tolerance = 1.0E-5))
+    assert(D_==(lrStat.p, 0.3500365602, tolerance = 1.0E-6))
 
 //    Need something to test against
 //    assert(D_==(scoreStat.chi2, ???, tolerance = 1.0E-5))

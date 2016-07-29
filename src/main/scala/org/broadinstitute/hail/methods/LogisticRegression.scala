@@ -4,29 +4,33 @@ import breeze.linalg._
 import org.apache.spark.rdd.RDD
 import org.broadinstitute.hail.Utils._
 import org.broadinstitute.hail.annotations.Annotation
-import org.broadinstitute.hail.expr._
 import org.broadinstitute.hail.stats.LogisticRegressionModel
 import org.broadinstitute.hail.variant._
 
 object LogisticRegression {
   def name = "LogisticRegression"
 
-  def `type`: Type = TStruct(
-    ("nMissing", TInt),
-    ("beta", TDouble),
-    ("se", TDouble),
-    ("zstat", TDouble),
-    ("pval", TDouble),
-    ("nIter", TInt),
-    ("converged", TBoolean),
-    ("exploded", TBoolean))
+  def buildX(gs: Iterable[Genotype], C: DenseMatrix[Double]): Option[DenseMatrix[Double]] = {
+    require(gs.size == C.rows)
+
+    val (nCalled, gtSum) = gs.flatMap(_.gt).foldRight((0,0))((gt, acc) => (acc._1 + 1, acc._2 + gt))
+
+    // allHomRef || allHomVar || allNoCall || allHet
+    if (gtSum == 0 || gtSum == 2 * nCalled || nCalled == 0 || (gtSum == nCalled && gs.flatMap(_.gt).forall(_ == 1)))
+      None
+    else {
+      val gtMean = gtSum.toDouble / nCalled
+      val gtArray = gs.map(_.gt.map(_.toDouble).getOrElse(gtMean)).toArray
+      Some(DenseMatrix.horzcat(new DenseMatrix(gtArray.length, 1, gtArray), C))
+    }
+  }
 
   def apply(vds: VariantDataset, y: DenseVector[Double], cov: Option[DenseMatrix[Double]]): LogisticRegression = {
     require(cov.forall(_.rows == y.size))
 
     // FIXME: improve message (or require Boolean and place in command)
     if (! y.forall(yi => yi == 0d || yi == 1d))
-      fatal(s"For logistic regression, each phenotype value must be 0 or 1.")
+      fatal(s"For logistic regression, phenotype must be Boolean or numeric will all values equal to 0 or 1.")
 
     val n = y.size
     val k = if (cov.isDefined) cov.get.cols else 0
@@ -37,49 +41,29 @@ object LogisticRegression {
 
     info(s"Running logreg on $n samples with $k sample ${plural(k, "covariate")}...")
 
-    val covAndOnes: DenseMatrix[Double] = cov match {
-      case Some(dm) => DenseMatrix.horzcat(dm, DenseMatrix.ones[Double](n, 1))
+    val C: DenseMatrix[Double] = cov match {
+      case Some(dm) => DenseMatrix.horzcat(DenseMatrix.ones[Double](n, 1), dm)
       case None => DenseMatrix.ones[Double](n, 1)
     }
 
-    val nullModel = new LogisticRegressionModel(covAndOnes, y)
+    val nullModel = new LogisticRegressionModel(C, y)
     val nullFit = nullModel.fit(nullModel.bInterceptOnly())
+    val b0 = DenseVector.vertcat(DenseVector(0d), nullFit.b)
 
     val sc = vds.sparkContext
     val yBc = sc.broadcast(y)
-    val covAndOnesBc = sc.broadcast(covAndOnes)
-    val b0Bc = sc.broadcast(DenseVector.vertcat(DenseVector(0d), nullFit.b))
-
-    // FIXME: worth making a version of aggregateByVariantWithKeys using sample index rather than sample name?
-    val sampleIndexBc = sc.broadcast(vds.sampleIds.zipWithIndex.toMap)
+    val CBc = sc.broadcast(C)
+    val b0Bc = sc.broadcast(b0)
 
     new LogisticRegression(vds.rdd
-      .map{ case (v, a, gs) =>
-        val (nCalled, gtSum) = gs.flatMap(_.gt).foldRight((0,0))((gt, acc) => (acc._1 + 1, acc._2 + gt))
-
-//        println(v)
-//        println(gs.flatMap(_.gt))
-
-        val annot =  // FIXME: improve this catch
-          if (gtSum == 0 || gtSum == 2 * nCalled || (gtSum == nCalled && gs.flatMap(_.gt).forall(_ == 1)) || nCalled == 0)
-            Annotation(n - nCalled, Annotation.empty, Annotation.empty, Annotation.empty, Annotation.empty, 0, Annotation.empty, Annotation.empty)
-          else {
-            val gtMean = gtSum.toDouble / nCalled
-            val gtArray = gs.map(_.gt.map(_.toDouble).getOrElse(gtMean)).toArray
-
-            val X = DenseMatrix.horzcat(new DenseMatrix(n, 1, gtArray), covAndOnesBc.value) // FIXME: make more efficient
-            val y = yBc.value
-
-            val fit = new LogisticRegressionModel(X, y).fit(b0Bc.value)
-
-            if (fit.converged) {
-              val waldStat = fit.waldTest()
-              Annotation(n - nCalled, waldStat.b(0), waldStat.se(0), waldStat.z(0), waldStat.p(0), fit.nIter, fit.converged, fit.exploded)
-            }
-            else
-              Annotation(n - nCalled, Annotation.empty, Annotation.empty, Annotation.empty, Annotation.empty, fit.nIter, fit.converged, fit.exploded)
-          }
-        (v, annot)
+      .map{ case (v, _, gs) =>
+        (v, buildX(gs, CBc.value)
+          .map { X =>
+            val model = new LogisticRegressionModel(X, yBc.value)
+            val fit = model.fit(b0Bc.value)
+            fit.toAnnotation(fit.waldTest())
+          }.getOrElse(Annotation.empty)
+        )
       }
     )
   }
