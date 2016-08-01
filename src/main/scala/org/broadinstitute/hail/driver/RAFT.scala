@@ -26,8 +26,9 @@ import org.broadinstitute.hail.utils.{SparseVariantSampleMatrix, SparseVariantSa
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
 
+import org.broadinstitute.hail.methods.RAFTStats
 
-
+import scala.collection.mutable.Map
 /**
   * Created by mitja on 7/22/16.
   */
@@ -57,8 +58,6 @@ object RAFT extends Command {
 
   def requiresVDS = true
 
-  //  seqOp: (U, Variant, Annotation, String, Annotation, T) => U,
-  //  combOp: (U, U) => U)(implicit uct: ClassTag[U]): RDD[(Variant, U)] = {
 
   def calcRAFT(state:State, pheno:String): RDD[(Variant, RaftCounter)] = {
 
@@ -66,6 +65,7 @@ object RAFT extends Command {
 
     val (base_type,pheno_query) = vds.querySA(pheno)
     val saBc = state.sc.broadcast(vds.sampleAnnotations)
+
 
     val var_rdd = vds.aggregateByVariantWithAll( new RaftCounter) ( {
       case (counter, v,va, s, sa, g ) => {
@@ -91,41 +91,25 @@ object RAFT extends Command {
     val partitioner = new HashPartitioner(n_partitions)
 
     info("Counting by anno " + annot)
+
+    /*
     val samplesPhenos = state.sc.broadcast(for (i <- state.vds.sampleIds.indices) yield {
         pheno_query(state.vds.sampleAnnotations(i))
         }
     )
+    */
 
-    //Array(pheno)
 
-    SparseVariantSampleMatrixRRDBuilder.buildByVA(  vds, state.sc,   partitioner ) ( {
-        case(v, va) =>  {
-          info("MAPPING ANNOTATION")
-          val anno = va_query(va).get.toString()
-          info("printing anno")
-        }
-      }).map( {
+    val res_rdd = SparseVariantSampleMatrixRRDBuilder.buildByVAstoreAllVAandSA(  vds, state.sc,   partitioner ) ( {
+        case(v, va) =>  va_query(va).get.toString
+    }).map( {
       case( anno, svm) =>
         {
           (anno.toString, new RaftAnnotationCounter(anno.toString, svm, pheno))
         }
     })
 
-
-    /*
-    val val_rdd = vds.aggregateByAnnotation( new RaftAnnotationCounter() ) ( {
-
-      case (rcounter, v, va, sampleid, sa, sample_indx, g) => {
-        val one =1
-        return Unit
-      }
-    }, {
-      case( counter1,counter2) => counter1.merge(counter2)
-    }, {
-      case( v, va) =>  va_query(va)
-    }
-    )
-    */
+    res_rdd
 
   }
 
@@ -141,10 +125,6 @@ object RAFT extends Command {
     //val phenos = get_phenotypes(state, pheno)
 
     val output = options.output
-
-  // why is this TBoolean not found even if imported?
-    // state.vds.saSignature.getAsOption[ TBoolean ](pheno) match {
-
 
 
 /*
@@ -170,7 +150,6 @@ object RAFT extends Command {
     //val (base_type,pheno_query) = state.vds.querySA(pheno)
 
     if ( group_by == null ) {
-
 
       info(s"Running single variant RAFT for phenotype " + pheno + " with " + state.vds.nSamples + " samples and " + state.vds.nVariants + " variants.")
       val resRDD = calcRAFT(state, pheno)
@@ -210,9 +189,6 @@ object RAFT extends Command {
         )
       )
 
-      val sb = new StringBuilder()
-      newVAS.pretty(sb, 1)
-      print(sb)
 
       return newstate
     }
@@ -220,6 +196,24 @@ object RAFT extends Command {
     {
       info(s"Running RAFT by annotation " + group_by+ " for phenotype " + pheno + " with " + state.vds.nSamples + " samples and " + state.vds.nVariants + " variants.")
       val resRDD = calcRAFT_by_annotation( state, pheno, group_by)
+      resRDD.mapValues( {
+        case (raft_counter) =>
+          print("stuff for gene. cases: " + raft_counter.n_cases + ", controls:" +   raft_counter.n_controls + ", missing_pheno" +
+            + raft_counter.n_missing_pheno + " raft stat:" + raft_counter.calculateRAFT() + "cum PHom:" + raft_counter.cumulativePHom )
+          raft_counter.calculateRAFT()
+          raft_counter
+
+      } )
+      if (output != null) {
+        hadoopDelete(output , state.hadoopConf, recursive = true)
+        resRDD.map { case (g, raft_stat) =>
+          val sb = new StringBuilder()
+          raft_stat.result_string(sb)
+          sb.result()
+        }.writeTable(output, Some(RaftAnnotationCounter.header))
+      }
+
+
       return state
     }
 
@@ -236,69 +230,142 @@ class RaftAnnotationCounter( annot: String, svm:SparseVariantSampleMatrix, pheno
   var n_missing_pheno: Int = 0
 
 
-  info("raft counter for " + annot)
+  val dis_prevalence = 0.000001
 
-  private val phaseCache = mutable.Map[(String,String),Option[Double]]()
+  private val phaseCache = mutable.Map[(String, String), Option[Double]]()
 
-  // holds mapping from sample id to list of variant ids the sample carries (either homozygotes, or compound hets)
-  var homvars =  Map[ String, ArrayBuffer[String] ]().withDefaultValue( new ArrayBuffer[String])
+  var cumulativePHom = 0.0
 
-  svm.mapSamples( {
+  var pVal: Option[Double] = None
+  var raftStat: Option[Double] = None
+  var genoRR: Option[Double] = None
 
-    case( sample_id, sample_idx, variant_idxs, genotypes ) => {
+  // mapping from variant to array of (allelecount, allelenumber, missing genotypes)
+  //var variant_freqs = mutable.Map[String, Array[Int]]().withDefaultValue( Array.fill[Int](3)(0))
+
+  var variant_freqs = mutable.Map.empty[String, Array[Int]]
+
+
+  var case_homvars = mutable.Map[String, ArrayBuffer[String]]()
+  var ctrl_homvars = mutable.Map[String, ArrayBuffer[String]]()
+
+
+  var case_hets = mutable.Set.empty[String]
+  var ctrls_hets = mutable.Set.empty[String]
+
+
+  var unique_case_hets: Int = 0
+  var unique_ctrl_hets: Int = 0
+  var unique_case_hom_ref: Int = 0
+  var unique_ctrl_hom_ref: Int = 0
+
+  var cumAF_counts = 0.0
+
+  compute_counts()
+  calculateRAFT()
+
+
+  private def compute_counts() {
+
+    svm.foreachSample({
+      case (sample_id, sample_idx, variant_idxs, genotypes) => {
         val phenotype = svm.getSampleAnnotation(sample_id, pheno)
 
-        print("sample anno of " + sample_id + " is " + phenotype)
         phenotype match {
-          case Some(true) => n_cases+=1
-          case Some(false) => n_controls+=1
-          case None => n_missing_pheno+=1
+          case Some(true) => n_cases += 1
+          case Some(false) => n_controls += 1
+          case None => n_missing_pheno += 1
         }
 
-        val hetSites = new ArrayBuffer[Int]
+        if (phenotype != None) {
+          val hetSites = new ArrayBuffer[Int]
 
-        variant_idxs.indices.foreach({
-          i =>
-          val vi = variant_idxs(i)
+          variant_idxs.indices.foreach({
+            i =>
+              val vi = variant_idxs(i)
+              var alleles = 0
+              var chroms = 0
+              var missing = 0
+              genotypes(i) match {
+                case 1 =>
+                  hetSites += vi
+                  alleles = 1
+                  chroms = 2
 
-          genotypes(i) match{
-            case 1 =>
-              hetSites += vi
+                  if (phenotype == Some(false)) {
+                    this.ctrls_hets.add(sample_id)
+                  } else if (phenotype == Some(true)) {
+                    this.case_hets.add(sample_id)
+                  }
 
-            case 2 =>
-              homvars( sample_id) += svm.variants( vi )
+                case 2 =>
 
-            case _ =>
-          }
-        })
+                  phenotype match {
+                    case Some(true) =>
+                      if (!case_homvars.contains(sample_id) )
+                        case_homvars(sample_id) = new ArrayBuffer[String]
 
-        hetSites.indices.foreach( {
-          i1 =>
-            val v1i = hetSites(i1)
-            Range(i1 + 1, hetSites.size).foreach({
-              i2 =>
-                val v2i = hetSites(i2)
+                      case_homvars(sample_id) += svm.variants(vi)
+                    case Some(false) =>
+                      if (!ctrl_homvars.contains(sample_id) )
+                        ctrl_homvars(sample_id) = new ArrayBuffer[String]
+                      ctrl_homvars(sample_id) += svm.variants(vi)
+                  }
 
-                val var1 = svm.variants(v1i)
-                val var2 = svm.variants(v2i)
+                  alleles = 2
+                  chroms = 2
+                case -1 =>
+                  missing = 1
 
-                getPhase( var1, var1 ) match {
-                  case Some(p_same_hap) =>
-                    if( p_same_hap < 0.5 ) {
-                      val comp_var_name = if (var1 < var2) var1 + "|" + var2 else var2 + "|" + var1
-                      homvars( sample_id) += comp_var_name
-                    }
+              }
+
+              if (phenotype == Some(false)) {
+                // variant freqs from controls
+                val varname =svm.variants(vi)
+
+                if(!variant_freqs.contains(varname)) {
+                  variant_freqs += (varname -> Array.fill[Int](3)(0))
                 }
-            }
-            )
+
+                var v = variant_freqs(varname)
+                v(0) += alleles
+                v(1) += chroms
+                v(2) += missing
+                variant_freqs.update(varname, v)
+              }
+
+          })
+
+          hetSites.indices.foreach({
+            i1 =>
+              val v1i = hetSites(i1)
+              Range(i1 + 1, hetSites.size).foreach({
+                i2 =>
+                  val v2i = hetSites(i2)
+
+                  val var1 = svm.variants(v1i)
+                  val var2 = svm.variants(v2i)
+
+                  getPhase(var1, var1) match {
+                    case Some(p_same_hap) =>
+                      if (p_same_hap < 0.5) {
+                        val comp_var_name = if (var1 < var2) var1 + "|" + var2 else var2 + "|" + var1
+
+                        //phenotype match {
+                          //case Some(true) => case_homvars(sample_id) += comp_var_name
+                          //case Some(false) => ctrl_homvars(sample_id) += comp_var_name
+                        //}
+
+                      }
+                  }
+              })
+          })
+
         }
-        )
+      }
+    })
+  }
 
-
-
-    }
-
-  })
 
   private def getPhase(v1: String, v2: String) : Option[Double] = {
     phaseCache.get((v1,v2)) match{
@@ -310,12 +377,96 @@ class RaftAnnotationCounter( annot: String, svm:SparseVariantSampleMatrix, pheno
     }
   }
 
-  def count_variants() {
-    val first =1
+
+  /**
+    *
+    * @return tuple of (raft_Stat, genotypic relative risk, p-value)
+    */
+  def calculateRAFT():(Option[Double], Option[Double], Option[Double]) = {
+
+    this.cumulativePHom = this.variant_freqs.map( {
+      case (v, counts) =>
+        Math.pow(counts(0).toDouble / (2*( n_controls - counts(2)  )).toDouble, 2)
+    }).sum
+
+    if( this.raftStat == None ) {
+      print("print calculating raft. N vars:" + this.variant_freqs.size + "case homs " + case_homvars.size + " ctrl homs" + ctrl_homvars.size)
+      val res = RAFTStats.raftStats(  case_homvars.size,n_cases, n_controls, ctrl_homvars.size, cumulativePHom, dis_prevalence  )
+      this.raftStat = res._1
+      this.genoRR = res._2
+      this.pVal = res._3
+
+
+      this.unique_case_hets = this.case_hets.filter( (iid ) => !this.case_homvars.contains(iid) ).size
+      this.unique_ctrl_hets = this.ctrls_hets.filter( (iid ) => !this.ctrl_homvars.contains(iid) ).size
+
+      this.unique_case_hom_ref = this.n_cases - this.unique_case_hets - this.case_homvars.size
+      this.unique_ctrl_hom_ref = this.n_controls - this.unique_ctrl_hets - this.ctrl_homvars.size
+
+      this.cumAF_counts =  ( unique_ctrl_hets + 2* this.ctrl_homvars.size ).toDouble / (2*this.n_controls).toDouble
+
+    }
+
+    return ( this.raftStat ,this.genoRR, this.pVal)
+  }
+
+  def result_string(sb:StringBuilder):Unit =  {
+
+
+    sb.append(this.unique_case_hom_ref )
+    sb.append( "\t" )
+    sb.append( this.unique_case_hets )
+    sb.append( "\t" )
+    sb.append( this.case_homvars.size )
+    sb.append( "\t" )
+    sb.append( this.unique_ctrl_hom_ref )
+    sb.append( "\t" )
+    sb.append( this.unique_ctrl_hets )
+    sb.append( "\t" )
+    sb.append( this.ctrl_homvars.size )
+    sb.append( "\t" )
+    sb.append( this.annot  )
+    sb.append( "\t" )
+    sb.append( this.variant_freqs.size.toString )
+    sb.append( "\t" )
+    sb.append( this.cumulativePHom.toString )
+    sb.append( "\t" )
+    sb.append( this.cumAF_counts.toString )
+    sb.append( "\t" )
+    sb.append( this.case_homvars.map{ case (iid,vars) => (iid,iid + "," + vars.result().mkString(",")) }.valuesIterator.mkString(";") )
+    sb.append( "\t" )
+    sb.append( this.ctrl_homvars.map{ case (iid,vars) => (iid,iid + "," + vars.result().mkString(",")) }.valuesIterator.mkString(";") )
+    sb.append( "\t" )
+
+    sb.append( this.genoRR.getOrElse("NA") )
+    sb.append( "\t" )
+
+    sb.append( this.raftStat.getOrElse("NA") )
+    sb.append( "\t" )
+
+    sb.append( this.pVal.getOrElse("NA")  )
+
   }
 
 }
 
+object  RaftAnnotationCounter {
+  val header = "n_hom_ref_case\t" +
+    "n_het_case\t" +
+    "n_hom_alt_case\t" +
+    "n_hom_ref_control\t" +
+    "n_het_control\t" +
+    "n_hom_alt_control\t" +
+    "grouped_by\t" +
+    "n_vars\t" +
+    "cum_p_hom\t" +
+    "cum_af_counts\t" +
+    "case_carriers\t" +
+    "control_carriers\t" +
+    "geno_RR\t" +
+    "log_LR\t" +
+    "p_val"
+}
 
 
 object RaftCounter {
@@ -369,6 +520,38 @@ class RaftCounter {
   var genoRR: Option[Double] = None
 
   def toAnnotation: Some[Annotation] = Some(Annotation(genoRR, raftStat, pVal, nHomRefCase,nHetCase,nHomAltCase,nMissingCase,nHomRefControl, nHetControl,nHomAltControl, nMissingControl))
+
+
+
+  def result_string(sb: StringBuilder) = {
+
+    sb.append(nHomRefCase)
+    sb.append("\t")
+    sb.append(nHetCase)
+    sb.append("\t")
+    sb.append(nHomAltCase)
+    sb.append("\t")
+    sb.append(nMissingCase)
+    sb.append("\t")
+
+    sb.append(nHomRefControl)
+    sb.append("\t")
+    sb.append(nHetControl)
+    sb.append("\t")
+    sb.append(nHomAltControl)
+    sb.append("\t")
+    sb.append(nMissingControl)
+    sb.append("\t")
+
+
+    sb.append( genoRR.getOrElse("NA") )
+    sb.append("\t")
+    sb.append( raftStat.getOrElse("NA") )
+    sb.append("\t")
+    sb.append( pVal.getOrElse("NA") )
+    sb.append("\t")
+
+  }
 
   def merge( o:RaftCounter  ):RaftCounter = {
 
@@ -460,100 +643,20 @@ class RaftCounter {
     if (enrichment<1) {
       return this
     }
-    val rf = new RAFTFunction( nHomAltCase, nHomRefCase+nHetCase+nHomAltCase, nHomAltControl, nHomRefControl+nHetControl+nHomAltControl, pHomozygote, diseasePrevalence)
-    val of = new UnivariateObjectiveFunction(rf)
 
-    val optim = new BrentOptimizer(1e-6, 1e-8)
+    val raft = RAFTStats.raftStats( nHomAltCase, nHomRefCase+nHetCase+nHomAltCase, nHomAltControl, nHomRefControl+nHetControl+nHomAltControl, pHomozygote, diseasePrevalence)
 
-    val result = optim.optimize(of, GoalType.MINIMIZE, new MaxIter(1000), new InitialGuess(Array(enrichment)), new MaxEval(1000), new SearchInterval(1,100000)  )
-
-    val minLL = result.getValue()
-    val nullLL = rf.loglik(1,true)
-
-    raftStat = Some(-minLL + nullLL)
-    genoRR = Some(result.getPoint)
-
-    val chiSqr = new ChiSquaredDistribution(1)
-
-    pVal = Some(Gamma.regularizedGammaQ( 0.5, raftStat.get.toDouble))
+    raftStat = raft._1
+    genoRR = raft._2
+    pVal = raft._3
 
     return this
   }
 
-  def result_string(sb: StringBuilder) = {
 
-    sb.append(nHomRefCase)
-    sb.append("\t")
-    sb.append(nHetCase)
-    sb.append("\t")
-    sb.append(nHomAltCase)
-    sb.append("\t")
-    sb.append(nMissingCase)
-    sb.append("\t")
-
-    sb.append(nHomRefControl)
-    sb.append("\t")
-    sb.append(nHetControl)
-    sb.append("\t")
-    sb.append(nHomAltControl)
-    sb.append("\t")
-    sb.append(nMissingControl)
-    sb.append("\t")
-
-
-    sb.append( genoRR.getOrElse("NA") )
-    sb.append("\t")
-    sb.append( raftStat.getOrElse("NA") )
-    sb.append("\t")
-    sb.append( pVal.getOrElse("NA") )
-    sb.append("\t")
-
-  }
 
 
 }
 
 
 
-class RAFTFunction( nCaseHom: Int, nCases:Int, nCtrlHom:Int, nCtrl:Int, pHomozygote:Double, diseasePrevalence:Double) extends UnivariateFunction {
-
-
-  def value( genoRR:Double): Double = {
-    return loglik(genoRR,false)
-  }
-
-  def loglik(genoRR:Double, nullModel:Boolean): Double = {
-    val alleleFreq = math.sqrt(pHomozygote)
-
-    var FStat = ((nCtrlHom / nCtrl.toFloat) - pHomozygote) / ( alleleFreq - pHomozygote ).toFloat
-
-
-    if (FStat < 0) {
-      FStat = 0
-    }
-
-    val corrPrHom = FStat * alleleFreq + (1- FStat) * pHomozygote
-
-    val denom = ( 1- pHomozygote) + genoRR * corrPrHom
-    val x = diseasePrevalence / denom
-
-    var pHomCase:Double = 0.0
-    var pHomControl:Double= 0.0
-
-    if (nullModel) {
-      pHomCase = corrPrHom
-      pHomControl = corrPrHom
-    }
-    else
-    {
-      pHomCase = genoRR * corrPrHom / denom
-      pHomControl = ((1- (genoRR *x) ) * corrPrHom ) / (1-diseasePrevalence)
-    }
-
-
-    val ll = ( math.log(pHomCase) * nCaseHom + math.log(pHomControl) * nCtrlHom + math.log(1-pHomControl) * (nCtrl-nCtrlHom) + math.log(1-pHomCase) * (nCases-nCaseHom) )
-
-    return -ll
-  }
-
-}
