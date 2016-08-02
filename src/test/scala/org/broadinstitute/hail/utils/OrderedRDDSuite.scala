@@ -26,21 +26,21 @@ class OrderedRDDSuite extends SparkSuite {
     val p = Prop.forAll(g, g) { case ((nPar1, it1), (nPar2, it2)) =>
       val m2 = it2.toMap
 
-      val rdd1 = OrderedRDD(sc.parallelize(it1, nPar1))
-      val rdd2 = OrderedRDD(sc.parallelize(it2, nPar2))
+      val rdd1 = OrderedRDD(sc.parallelize(it1, nPar1)).cache()
+      val rdd2 = OrderedRDD(sc.parallelize(it2, nPar2)).cache()
 
       println(s"""rdd1: ${rdd1.getPartitions.size}, ${rdd1.getPartitions.toIndexedSeq}""")
       println(s"""rdd2: ${rdd2.getPartitions.size}, ${rdd2.getPartitions.toIndexedSeq}""")
 
-      val join: IndexedSeq[(Variant, (String, Option[String]))] = rdd1.orderedLeftJoin(rdd2).collect().toIndexedSeq
+      val join: IndexedSeq[(Variant, (String, Option[String]))] = rdd1.orderedLeftJoinDistinct(rdd2).collect().toIndexedSeq
       //      println(join)
       //      println(join.size, join.count { case (v, (i1, i2)) => i2.isDefined })
 
       val check1 = it1 == join.map { case (k, (v1, _)) => (k, v1) }
       val check2 = join.forall { case (k, (_, v2)) => v2 == m2.get(k) }
-
-      println(check1, check2)
-      check1 && check2
+      val check3 = rdd1.leftOuterJoinDistinct(rdd2).collect().toMap == join.toMap
+      println(check1, check2, check3)
+      check1 && check2 && check3
     }
 
     p.check(size = 1000) // important to keep size at ~1000 to get reasonable levels of match and no match
@@ -65,7 +65,6 @@ class OrderedRDDSuite extends SparkSuite {
       }
 
       val status = hadoopFileStatus(tmpPartitioner, hadoopConf)
-
 
       val rddReadBack = sqlContext.readPartitioned.parquet(tmpRdd)
         .rdd

@@ -24,6 +24,9 @@ import org.apache.spark.{Partition => SparkPartition}
 
 import scala.collection.JavaConversions._
 
+/**
+  *
+  */
 class PartitionedParquetRelation(paths: Array[String],
   maybeDataSchema: Option[StructType],
   maybePartitionSpec: Option[PartitionSpec],

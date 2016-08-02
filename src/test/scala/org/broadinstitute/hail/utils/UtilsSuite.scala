@@ -118,7 +118,7 @@ class UtilsSuite extends SparkSuite {
     val p = Prop.forAll(g, g) { case (it1, it2) =>
       val m2 = it2.toMap
 
-      val join = it1.iterator.sortedLeftJoin(it2.iterator).toIndexedSeq
+      val join = it1.iterator.sortedLeftJoinDistinct(it2.iterator).toIndexedSeq
 
       val check1 = it1 == join.map { case (k, (v1, _)) => (k, v1) }
       val check2 = join.forall { case (k, (_, v2)) => v2 == m2.get(k) }

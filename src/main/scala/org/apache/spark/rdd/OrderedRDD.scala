@@ -28,9 +28,6 @@ class OrderedRDD[K, V](rdd: RDD[(K, V)], p: OrderedPartitioner[K, _])
   def compute(split: Partition, context: TaskContext): Iterator[(K, V)] = rdd.compute(split, context)
 
   override def getPreferredLocations(split: Partition): Seq[String] = rdd.preferredLocations(split)
-
-  //  def leftJoin[V2](other: OrderedRDD[K, V2]): OrderedRDDLeftJoin[K, V, V2] = new OrderedRDDLeftJoin(this, other)
-  def leftJoin[V2](other: OrderedRDD[K, V2]): OrderedRDDLeftJoin[K, V, V2] = new OrderedRDDLeftJoin(this, other)
 }
 
 case class OneDependency[T](rdd: RDD[T]) extends Dependency[T]
@@ -99,39 +96,6 @@ class OrderedRDDLeftJoin[K, V1, V2](rdd1: OrderedRDD[K, V1], rdd2: OrderedRDD[K,
       .iterator
       .flatMap(i => rdd2.compute(rdd2.partitions(i), context))
 
-    left.sortedLeftJoin(right)
-    // FIXME there are two ways to do this, talk with Cotton
-    //
-    //    if (left.isEmpty)
-    //      Iterator.empty
-    //    else {
-    //      val leftHead = left.next()
-    //      val rightStart = rdd2.partitioner.get.getPartition(leftHead._1)
-    //      val rightIterator = new PartitionSpanningIterator[(K, V2)](rdd2, rightStart, context)
-    //      (Iterator(leftHead) ++ left).sortedLeftJoin(rightIterator)
-    //    }
-  }
-}
-
-class PartitionSpanningIterator[T](rdd: RDD[T], start: Int, context: TaskContext) extends Iterator[T] {
-  private var i = start
-  private var it = rdd.compute(rdd.partitions(i), context)
-
-  def next(): T = {
-    if (hasNext)
-      it.next()
-    else
-      throw new java.util.NoSuchElementException("next on empty iterator")
-  }
-
-  def hasNext: Boolean = {
-    if (it.hasNext)
-      true
-    else if (i + 1 < rdd.partitions.length) {
-      i += 1
-      it = rdd.compute(rdd.partitions(i), context)
-      hasNext
-    } else false
-
+    left.sortedLeftJoinDistinct(right)
   }
 }

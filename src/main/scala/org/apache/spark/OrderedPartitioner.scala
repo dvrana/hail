@@ -22,13 +22,17 @@ import scala.util.hashing._
   */
 class OrderedPartitioner[K: Ordering : ClassTag, V](
   @transient partitions: Int,
-  @transient rdd: RDD[_ <: Product2[K, V]],
+  @transient rdd: RDD[_ <: Product2[K, V]], //FIXME conversion from type of RDD to type of Partitioner K, partition by locus
   range: Option[Array[K]] = None,
   private var ascending: Boolean = true)
   extends Partitioner {
 
   // We allow partitions = 0, which happens when sorting an empty RDD under the default settings.
   require(partitions >= 0, s"Number of partitions cannot be negative but found $partitions.")
+
+  def mapToNewPartitioner[T: Ordering : ClassTag, U](f: K => T, rdd: RDD[_ <: Product2[T, U]]): OrderedPartitioner[T, U] = {
+    new OrderedPartitioner(rdd.partitions.length, rdd, range = Some(rangeBounds.map(f)), ascending = ascending)
+  }
 
   def write(out: ObjectOutputStream) {
     out.writeBoolean(ascending)

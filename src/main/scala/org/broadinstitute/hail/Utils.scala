@@ -14,7 +14,7 @@ import org.apache.hadoop.io.{BytesWritable, NullWritable}
 import org.apache.spark.Partitioner._
 import org.apache.spark.mllib.linalg.distributed.IndexedRow
 import org.apache.spark.mllib.linalg.{DenseVector => SDenseVector, SparseVector => SSparseVector, Vector => SVector}
-import org.apache.spark.rdd.{OrderedRDDLeftJoin, RDD}
+import org.apache.spark.rdd.{OrderedRDD, OrderedRDDLeftJoin, RDD}
 import org.apache.spark.sql.{PartitionedDataFrameReader, Row, SQLContext}
 import org.apache.spark.{AccumulableParam, Partitioner, SparkContext}
 import org.broadinstitute.hail.Utils._
@@ -476,7 +476,9 @@ class RichPairRDD[K, V](val r: RDD[(K, V)]) extends AnyVal {
     }
   }
 
-  def orderedLeftJoin[W](other: RDD[(K, W)])
+  def toOrderedRDD(implicit ordering: Ordering[K], tct: ClassTag[K], vct1: ClassTag[V]): OrderedRDD[K, V] = OrderedRDD(r)
+
+  def orderedLeftJoinDistinct[W](other: RDD[(K, W)])
     (implicit ordering: Ordering[K], tct: ClassTag[K], vct1: ClassTag[V], vct2: ClassTag[W]): RDD[(K, (V, Option[W]))] = {
     OrderedRDDLeftJoin(r, other)
   }
@@ -578,7 +580,7 @@ class RichPairTraversableOnce[K, V](val t: TraversableOnce[(K, V)]) extends AnyV
 
 class RichSortedPairIterator[K, V1](val it: Iterator[(K, V1)]) extends AnyVal {
 
-  def sortedLeftJoin[V2](other: Iterator[(K, V2)])
+  def sortedLeftJoinDistinct[V2](other: Iterator[(K, V2)])
     (implicit ordering: Ordering[K]): Iterator[(K, (V1, Option[V2]))] = {
     import ordering._
 

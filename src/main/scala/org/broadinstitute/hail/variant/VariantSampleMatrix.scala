@@ -2,10 +2,10 @@ package org.broadinstitute.hail.variant
 
 import java.nio.ByteBuffer
 
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{OrderedRDD, RDD}
 import org.apache.spark.sql.types._
 import org.apache.spark.sql.{PartitionedDataFrameReader, Row, SQLContext}
-import org.apache.spark.{SparkContext, SparkEnv}
+import org.apache.spark.{OrderedPartitioner, SparkContext, SparkEnv}
 import org.broadinstitute.hail.Utils._
 import org.broadinstitute.hail.annotations._
 import org.broadinstitute.hail.check.Gen
@@ -132,24 +132,32 @@ object VariantSampleMatrix {
 
     val vaRequiresConversion = SparkAnnotationImpex.requiresConversion(vaSignature)
 
-    if (skipGenotypes)
-      new VariantSampleMatrix[Genotype](
-        metadata.copy(sampleIds = IndexedSeq.empty[String],
-          sampleAnnotations = IndexedSeq.empty[Annotation]),
-        df.select("variant", "annotations")
-          .map(row => (row.getVariant(0),
-            if (vaRequiresConversion) SparkAnnotationImpex.importAnnotation(row.get(1), vaSignature) else row.get(1),
+    val rdd: RDD[(Variant, (Annotation, Iterable[Genotype]))] = if (skipGenotypes)
+      df.select("variant", "annotations")
+        .map(row => (row.getVariant(0),
+          (if (vaRequiresConversion) SparkAnnotationImpex.importAnnotation(row.get(1), vaSignature) else row.get(1),
             Iterable.empty[Genotype])))
     else
-      new VariantSampleMatrix(
-        metadata,
-        df.rdd.map { row =>
-          val v = row.getVariant(0)
+      df.rdd.map { row =>
+        val v = row.getVariant(0)
 
-          (v,
-            if (vaRequiresConversion) SparkAnnotationImpex.importAnnotation(row.get(1), vaSignature) else row.get(1),
-            row.getGenotypeStream(v, 2))
-        })
+        (v,
+          (if (vaRequiresConversion) SparkAnnotationImpex.importAnnotation(row.get(1), vaSignature) else row.get(1),
+            row.getGenotypeStream(v, 2)))
+      }
+
+    val partitioner = readObjectFile(dirname + "partitioner", sqlContext.sparkContext.hadoopConfiguration) { in =>
+      OrderedPartitioner.read[Variant, (Annotation, Iterable[Genotype])](in)(rdd)
+    }
+
+    val orderedRDD = new OrderedRDD[Variant, (Annotation, Iterable[Genotype])](rdd, partitioner)
+      .map { case (v, (va, gs)) => (v, va, gs) }
+
+    new VariantSampleMatrix[Genotype](
+      if (skipGenotypes) metadata.copy(sampleIds = IndexedSeq.empty[String],
+        sampleAnnotations = IndexedSeq.empty[Annotation])
+      else metadata,
+      orderedRDD)
   }
 
   def kuduRowType(vaSignature: Type): Type = TStruct("variant" -> Variant.t,
@@ -674,14 +682,16 @@ class VariantSampleMatrix[T](val metadata: VariantMetadata,
 
   def annotateVariants(otherRDD: RDD[(Variant, Annotation)], newSignature: Type,
     inserter: Inserter): VariantSampleMatrix[T] = {
-    val newRDD = rdd.map { case (v, va, gs) => (v, (va, gs)) }
-      .leftOuterJoinDistinct(otherRDD)
-      .map { case (v, ((va, gs), annotation)) => (v, inserter(va, annotation), gs) }
+    val newRDD = rdd.map { case (v, va, gs) => (v, (va, gs)) }.orderedLeftJoinDistinct(otherRDD)
+      .map { case (v, ((va, gs), annotation)) =>
+        (v, inserter(va, annotation), gs)
+      }
     copy(rdd = newRDD, vaSignature = newSignature)
   }
 
   def annotateLoci(lociRDD: RDD[(Locus, Annotation)], newSignature: Type, inserter: Inserter): VariantSampleMatrix[T] = {
-    val newRDD = rdd.map { case (v, va, gs) => (v.locus, (v, va, gs)) }
+    val newRDD = rdd
+      .map { case (v, va, gs) => (v.locus, (v, va, gs)) }
       .leftOuterJoinDistinct(lociRDD)
       .map { case (l, ((v, va, gs), annotation)) => (v, inserter(va, annotation), gs) }
     copy(rdd = newRDD, vaSignature = newSignature)
@@ -839,6 +849,11 @@ class RichVDS(vds: VariantDataset) {
 
     val vaSignature = vds.vaSignature
     val vaRequiresConversion = SparkAnnotationImpex.requiresConversion(vaSignature)
+
+    val ordered = OrderedRDD(vds.rdd.map { case (v, va, gs) => (v, (va, gs)) })
+    writeObjectFile(dirname + "partitioner", vds.sparkContext.hadoopConfiguration) { out =>
+      ordered.orderedPartitioner.write(out)
+    }
 
     val rowRDD = vds.rdd
       .map {
