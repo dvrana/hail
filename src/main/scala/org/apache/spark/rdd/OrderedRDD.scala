@@ -19,6 +19,8 @@ object OrderedRDD {
 class OrderedRDD[K, V](rdd: RDD[(K, V)], p: OrderedPartitioner[K, _])
   (implicit ordering: Ordering[K]) extends RDD[(K, V)](rdd) {
 
+  def orderedPartitioner = p
+
   override val partitioner: Option[Partitioner] = Some(p)
 
   def getPartitions: Array[Partition] = rdd.partitions
@@ -33,8 +35,28 @@ class OrderedRDD[K, V](rdd: RDD[(K, V)], p: OrderedPartitioner[K, _])
 
 case class OneDependency[T](rdd: RDD[T]) extends Dependency[T]
 
-
 case class OrderedJoinPartition(index: Int) extends Partition
+
+object RangeDependency {
+  def getDependencies[K, V](p1: OrderedPartitioner[K, _], p2: OrderedPartitioner[K, _])(partitionId: Int): Seq[Int] = {
+
+    val lastPartition = if (partitionId == p1.rangeBounds.length)
+      p2.numPartitions - 1
+    else
+      p2.getPartition(p1.rangeBounds(partitionId))
+
+    if (partitionId == 0)
+      0 to lastPartition
+    else {
+      val startPartition = p2.getPartition(p1.rangeBounds(partitionId - 1))
+      startPartition to lastPartition
+    }
+  }
+}
+
+class RangeDependency[K, V](p1: OrderedPartitioner[K, _], p2: OrderedPartitioner[K, _], rdd: RDD[(K, V)]) extends NarrowDependency[(K, V)](rdd) {
+  override def getParents(partitionId: Int): Seq[Int] = RangeDependency.getDependencies(p1, p2)(partitionId)
+}
 
 object OrderedRDDLeftJoin {
   def apply[K, V1, V2](rdd1: RDD[(K, V1)], rdd2: RDD[(K, V2)])
@@ -46,10 +68,12 @@ object OrderedRDDLeftJoin {
 
 class OrderedRDDLeftJoin[K, V1, V2](rdd1: OrderedRDD[K, V1], rdd2: OrderedRDD[K, V2])(implicit ordering: Ordering[K])
   extends RDD[(K, (V1, Option[V2]))](rdd1.sparkContext,
-    Seq(new OneToOneDependency(rdd1), new ShuffleDependency(rdd2, rdd2.partitioner.get)): Seq[Dependency[_]]) {
-  //FIXME WRONG
+    Seq(new OneToOneDependency(rdd1), new RangeDependency(rdd1.orderedPartitioner, rdd2.orderedPartitioner, rdd2)): Seq[Dependency[_]]) {
 
   override val partitioner: Option[Partitioner] = rdd1.partitioner
+
+  lazy val p1 = rdd1.orderedPartitioner
+  lazy val p2 = rdd2.orderedPartitioner
 
   val localPartitions = rdd1.getPartitions.indices.map(OrderedJoinPartition).map(_.asInstanceOf[Partition]).toArray
 
@@ -71,15 +95,21 @@ class OrderedRDDLeftJoin[K, V1, V2](rdd1: OrderedRDD[K, V1], rdd2: OrderedRDD[K,
 
   def compute(split: Partition, context: TaskContext): Iterator[(K, (V1, Option[V2]))] = {
     val left = rdd1.compute(split, context)
+    val right = RangeDependency.getDependencies(p1, p2)(split.index)
+      .iterator
+      .flatMap(i => rdd2.compute(rdd2.partitions(i), context))
 
-    if (left.isEmpty)
-      Iterator.empty
-    else {
-      val leftHead = left.next()
-      val rightStart = rdd2.partitioner.get.getPartition(leftHead._1)
-      val rightIterator = new PartitionSpanningIterator[(K, V2)](rdd2, rightStart, context)
-      (Iterator(leftHead) ++ left).sortedLeftJoin(rightIterator)
-    }
+    left.sortedLeftJoin(right)
+    // FIXME there are two ways to do this, talk with Cotton
+    //
+    //    if (left.isEmpty)
+    //      Iterator.empty
+    //    else {
+    //      val leftHead = left.next()
+    //      val rightStart = rdd2.partitioner.get.getPartition(leftHead._1)
+    //      val rightIterator = new PartitionSpanningIterator[(K, V2)](rdd2, rightStart, context)
+    //      (Iterator(leftHead) ++ left).sortedLeftJoin(rightIterator)
+    //    }
   }
 }
 
