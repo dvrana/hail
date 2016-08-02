@@ -14,7 +14,7 @@ import org.apache.hadoop.io.{BytesWritable, NullWritable}
 import org.apache.spark.Partitioner._
 import org.apache.spark.mllib.linalg.distributed.IndexedRow
 import org.apache.spark.mllib.linalg.{DenseVector => SDenseVector, SparseVector => SSparseVector, Vector => SVector}
-import org.apache.spark.rdd.RDD
+import org.apache.spark.rdd.{OrderedRDDLeftJoin, RDD}
 import org.apache.spark.sql.{PartitionedDataFrameReader, Row, SQLContext}
 import org.apache.spark.{AccumulableParam, Partitioner, SparkContext}
 import org.broadinstitute.hail.Utils._
@@ -475,6 +475,11 @@ class RichPairRDD[K, V](val r: RDD[(K, V)]) extends AnyVal {
       for (v <- pair._1.iterator; w <- pair._2.iterator.take(1)) yield (v, w)
     }
   }
+
+  def orderedLeftJoin[W](other: RDD[(K, W)])
+    (implicit ordering: Ordering[K], tct: ClassTag[K], vct1: ClassTag[V], vct2: ClassTag[W]): RDD[(K, (V, Option[W]))] = {
+    OrderedRDDLeftJoin(r, other)
+  }
 }
 
 class RichIndexedRow(val r: IndexedRow) extends AnyVal {
@@ -568,6 +573,40 @@ class RichPairTraversableOnce[K, V](val t: TraversableOnce[(K, V)]) extends AnyV
       }
     }
     m
+  }
+}
+
+class RichSortedPairIterator[K, V1](val it: Iterator[(K, V1)]) extends AnyVal {
+
+  def sortedLeftJoin[V2](other: Iterator[(K, V2)])
+    (implicit ordering: Ordering[K]): Iterator[(K, (V1, Option[V2]))] = {
+    import ordering._
+
+    if (other.isEmpty)
+      it.map { case (k, v) => (k, (v, None)) }
+    else {
+      val (_1, _2) = other.next()
+      var k2 = _1
+      var v2 = _2
+
+      for ((k, v1) <- it) yield {
+        if (k2 > k)
+          (k, (v1, None))
+        else if (k2 == k)
+          (k, (v1, Some(v2)))
+        else {
+          while (k2 < k && other.hasNext) {
+            val (_1, _2) = other.next()
+            k2 = _1
+            v2 = _2
+          }
+          if (k2 == k)
+            (k, (v1, Some(v2)))
+          else
+            (k, (v1, None))
+        }
+      }
+    }
   }
 }
 
@@ -1289,6 +1328,8 @@ object Utils extends Logging {
     .filter(s => !s.isEmpty)
 
   implicit def richIterator[T](it: Iterator[T]): RichIterator[T] = new RichIterator[T](it)
+
+  implicit def toRichSortedPairIterator[K, V](it: Iterator[(K, V)]): RichSortedPairIterator[K, V] = new RichSortedPairIterator(it)
 
   implicit def richBoolean(b: Boolean): RichBoolean = new RichBoolean(b)
 
