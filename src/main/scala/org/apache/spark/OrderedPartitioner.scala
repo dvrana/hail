@@ -11,6 +11,47 @@ import scala.collection.mutable.ArrayBuffer
 import scala.reflect.ClassTag
 import scala.util.hashing._
 
+/**
+  * Lifted from org.apache.spark.RangePartitioner.scala in
+  */
+object CalculateKeyRanges {
+  def apply[K : Ordering : ClassTag](rdd: RDD[K]): Array[K] = {
+    // This is the sample size we need to have roughly balanced output partitions, capped at 1M.
+    val sampleSize = math.min(20.0 * rdd.partitions.length, 1e6)
+    // Assume the input partitions are roughly balanced and over-sample a little bit.
+    val sampleSizePerPartition = math.ceil(3.0 * sampleSize / rdd.partitions.length).toInt
+    val (numItems, sketched) = RangePartitioner.sketch(rdd, sampleSizePerPartition)
+    if (numItems == 0L) {
+      Array.empty
+    } else {
+      // If a partition contains much more than the average number of items, we re-sample from it
+      // to ensure that enough items are collected from that partition.
+      val fraction = math.min(sampleSize / math.max(numItems, 1L), 1.0)
+      val candidates = ArrayBuffer.empty[(K, Float)]
+      val imbalancedPartitions = mutable.Set.empty[Int]
+      sketched.foreach { case (idx, n, sample) =>
+        if (fraction * n > sampleSizePerPartition) {
+          imbalancedPartitions += idx
+        } else {
+          // The weight is 1 over the sampling probability.
+          val weight = (n.toDouble / sample.length).toFloat
+          for (key <- sample) {
+            candidates += ((key, weight))
+          }
+        }
+      }
+      if (imbalancedPartitions.nonEmpty) {
+        // Re-sample imbalanced partitions with the desired sampling probability.
+        val imbalanced = new PartitionPruningRDD(rdd, imbalancedPartitions.contains)
+        val seed = byteswap32(-rdd.id - 1)
+        val reSampled = imbalanced.sample(withReplacement = false, fraction, seed).collect()
+        val weight = (1.0 / fraction).toFloat
+        candidates ++= reSampled.map(x => (x, weight))
+      }
+      RangePartitioner.determineBounds(candidates, rdd.partitions.length)
+    }
+  }
+}
 
 /**
   * A [[org.apache.spark.Partitioner]] that partitions sortable records by range into roughly
@@ -20,19 +61,10 @@ import scala.util.hashing._
   * as the `partitions` parameter, in the case where the number of sampled records is less than
   * the value of `partitions`.
   */
-class OrderedPartitioner[K: Ordering : ClassTag, V](
-  @transient partitions: Int,
-  @transient rdd: RDD[_ <: Product2[K, V]], //FIXME conversion from type of RDD to type of Partitioner K, partition by locus
-  range: Option[Array[K]] = None,
+case class OrderedPartitioner[K: Ordering : ClassTag](
+  rangeBounds: Array[K],
   private var ascending: Boolean = true)
   extends Partitioner {
-
-  // We allow partitions = 0, which happens when sorting an empty RDD under the default settings.
-  require(partitions >= 0, s"Number of partitions cannot be negative but found $partitions.")
-
-  def mapToNewPartitioner[T: Ordering : ClassTag, U](f: K => T, rdd: RDD[_ <: Product2[T, U]]): OrderedPartitioner[T, U] = {
-    new OrderedPartitioner(rdd.partitions.length, rdd, range = Some(rangeBounds.map(f)), ascending = ascending)
-  }
 
   def write(out: ObjectOutputStream) {
     out.writeBoolean(ascending)
@@ -40,48 +72,6 @@ class OrderedPartitioner[K: Ordering : ClassTag, V](
   }
 
   var ordering = implicitly[Ordering[K]]
-
-  // An array of upper bounds for the first (partitions - 1) partitions
-  var rangeBounds: Array[K] = range.getOrElse {
-    if (partitions <= 1) {
-      Array.empty
-    } else {
-      // This is the sample size we need to have roughly balanced output partitions, capped at 1M.
-      val sampleSize = math.min(20.0 * partitions, 1e6)
-      // Assume the input partitions are roughly balanced and over-sample a little bit.
-      val sampleSizePerPartition = math.ceil(3.0 * sampleSize / rdd.partitions.size).toInt
-      val (numItems, sketched) = RangePartitioner.sketch(rdd.map(_._1), sampleSizePerPartition)
-      if (numItems == 0L) {
-        Array.empty
-      } else {
-        // If a partition contains much more than the average number of items, we re-sample from it
-        // to ensure that enough items are collected from that partition.
-        val fraction = math.min(sampleSize / math.max(numItems, 1L), 1.0)
-        val candidates = ArrayBuffer.empty[(K, Float)]
-        val imbalancedPartitions = mutable.Set.empty[Int]
-        sketched.foreach { case (idx, n, sample) =>
-          if (fraction * n > sampleSizePerPartition) {
-            imbalancedPartitions += idx
-          } else {
-            // The weight is 1 over the sampling probability.
-            val weight = (n.toDouble / sample.size).toFloat
-            for (key <- sample) {
-              candidates += ((key, weight))
-            }
-          }
-        }
-        if (imbalancedPartitions.nonEmpty) {
-          // Re-sample imbalanced partitions with the desired sampling probability.
-          val imbalanced = new PartitionPruningRDD(rdd.map(_._1), imbalancedPartitions.contains)
-          val seed = byteswap32(-rdd.id - 1)
-          val reSampled = imbalanced.sample(withReplacement = false, fraction, seed).collect()
-          val weight = (1.0 / fraction).toFloat
-          candidates ++= reSampled.map(x => (x, weight))
-        }
-        RangePartitioner.determineBounds(candidates, partitions)
-      }
-    }
-  }
 
   def numPartitions: Int = rangeBounds.length + 1
 
@@ -114,7 +104,7 @@ class OrderedPartitioner[K: Ordering : ClassTag, V](
   }
 
   override def equals(other: Any): Boolean = other match {
-    case r: OrderedPartitioner[_, _] =>
+    case r: OrderedPartitioner[_] =>
       r.rangeBounds.sameElements(rangeBounds) && r.ascending == ascending
     case _ =>
       false
@@ -131,48 +121,12 @@ class OrderedPartitioner[K: Ordering : ClassTag, V](
     result = prime * result + ascending.hashCode
     result
   }
-
-  @throws(classOf[IOException])
-  private def writeObject(out: ObjectOutputStream): Unit = Utils.tryOrIOException {
-    val sfactory = SparkEnv.get.serializer
-    sfactory match {
-      case js: JavaSerializer => out.defaultWriteObject()
-      case _ =>
-        out.writeBoolean(ascending)
-        out.writeObject(ordering)
-        out.writeObject(binarySearch)
-
-        val ser = sfactory.newInstance()
-        Utils.serializeViaNestedStream(out, ser) { stream =>
-          stream.writeObject(scala.reflect.classTag[Array[K]])
-          stream.writeObject(rangeBounds)
-        }
-    }
-  }
-
-  @throws(classOf[IOException])
-  private def readObject(in: ObjectInputStream): Unit = Utils.tryOrIOException {
-    val sfactory = SparkEnv.get.serializer
-    sfactory match {
-      case js: JavaSerializer => in.defaultReadObject()
-      case _ =>
-        ascending = in.readBoolean()
-        ordering = in.readObject().asInstanceOf[Ordering[K]]
-        binarySearch = in.readObject().asInstanceOf[(Array[K], K) => Int]
-
-        val ser = sfactory.newInstance()
-        Utils.deserializeViaNestedStream(in, ser) { ds =>
-          implicit val classTag = ds.readObject[ClassTag[Array[K]]]()
-          rangeBounds = ds.readObject[Array[K]]()
-        }
-    }
-  }
 }
 
 object OrderedPartitioner {
-  def read[K: Ordering : ClassTag, V](in: ObjectInputStream)(rdd: RDD[(K, V)]): OrderedPartitioner[K, V] = {
+  def read[K: Ordering : ClassTag, T](in: ObjectInputStream)(rdd: RDD[(T, _)])(implicit ev: (T) => K): OrderedPartitioner[K] = {
     val ascending = in.readBoolean()
     val rangeBounds = in.readObject().asInstanceOf[Array[K]]
-    new OrderedPartitioner(partitions = rdd.partitions.length, rdd, range = Some(rangeBounds), ascending = ascending)
+    OrderedPartitioner(rangeBounds, ascending)
   }
 }

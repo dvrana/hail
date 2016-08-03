@@ -6,18 +6,19 @@ import org.broadinstitute.hail.Utils._
 import scala.reflect.ClassTag
 
 object OrderedRDD {
-  def apply[K, V](rdd: RDD[(K, V)])(implicit ordering: Ordering[K], tct: ClassTag[K], vct: ClassTag[V]): OrderedRDD[K, V] = {
+  def apply[K: ClassTag, V: ClassTag, T: ClassTag](rdd: RDD[(K, V)])(implicit ordering: Ordering[K], ev: (K) => T): OrderedRDD[K, V, T] = {
     rdd.partitioner match {
-      case Some(p: OrderedPartitioner[K, _]) => new OrderedRDD(rdd, p)
+      case Some(p: OrderedPartitioner[T]) => new OrderedRDD(rdd, p)
       case _ =>
-        val partitioner = new OrderedPartitioner[K, V](rdd.partitions.length, rdd)
+        val ranges = CalculateKeyRanges(rdd.keys.map(ev))
+        val partitioner = OrderedPartitioner[T](ranges)
         new OrderedRDD(rdd.repartitionAndSortWithinPartitions(partitioner), partitioner)
     }
   }
 }
 
-class OrderedRDD[K, V](rdd: RDD[(K, V)], p: OrderedPartitioner[K, _])
-  (implicit ordering: Ordering[K]) extends RDD[(K, V)](rdd) {
+class OrderedRDD[K, V, T](rdd: RDD[(K, V)], p: OrderedPartitioner[T])
+  (implicit ordering: Ordering[K], ev: (K) => T) extends RDD[(K, V)](rdd) {
 
   def orderedPartitioner = p
 
@@ -35,7 +36,7 @@ case class OneDependency[T](rdd: RDD[T]) extends Dependency[T]
 case class OrderedJoinPartition(index: Int) extends Partition
 
 object RangeDependency {
-  def getDependencies[K, V](p1: OrderedPartitioner[K, _], p2: OrderedPartitioner[K, _])(partitionId: Int): Seq[Int] = {
+  def getDependencies[K](p1: OrderedPartitioner[K], p2: OrderedPartitioner[K])(partitionId: Int): Seq[Int] = {
 
     val lastPartition = if (partitionId == p1.rangeBounds.length)
       p2.numPartitions - 1
@@ -51,19 +52,21 @@ object RangeDependency {
   }
 }
 
-class RangeDependency[K, V](p1: OrderedPartitioner[K, _], p2: OrderedPartitioner[K, _], rdd: RDD[(K, V)]) extends NarrowDependency[(K, V)](rdd) {
+class RangeDependency[K, V, T](p1: OrderedPartitioner[K], p2: OrderedPartitioner[K], rdd: RDD[(T, V)]) extends NarrowDependency[(T, V)](rdd) {
   override def getParents(partitionId: Int): Seq[Int] = RangeDependency.getDependencies(p1, p2)(partitionId)
 }
 
 object OrderedRDDLeftJoin {
-  def apply[K, V1, V2](rdd1: RDD[(K, V1)], rdd2: RDD[(K, V2)])
-    (implicit ordering: Ordering[K], tct: ClassTag[K], vct1: ClassTag[V1], vct2: ClassTag[V2]): OrderedRDDLeftJoin[K, V1, V2] = {
+  def apply[K, V1, V2, T](rdd1: RDD[(K, V1)], rdd2: RDD[(K, V2)])
+    (implicit ordering: Ordering[K], tct: ClassTag[K],
+      vct1: ClassTag[V1], vct2: ClassTag[V2], ev: (K) => T): OrderedRDDLeftJoin[K, V1, V2, T] = {
 
     new OrderedRDDLeftJoin(OrderedRDD(rdd1), OrderedRDD(rdd2))
   }
 }
 
-class OrderedRDDLeftJoin[K, V1, V2](rdd1: OrderedRDD[K, V1], rdd2: OrderedRDD[K, V2])(implicit ordering: Ordering[K])
+class OrderedRDDLeftJoin[K, V1, V2, T](rdd1: OrderedRDD[K, V1, T], rdd2: OrderedRDD[K, V2, T])
+  (implicit ordering: Ordering[K], ev1: (K) => T)
   extends RDD[(K, (V1, Option[V2]))](rdd1.sparkContext,
     Seq(new OneToOneDependency(rdd1), new RangeDependency(rdd1.orderedPartitioner, rdd2.orderedPartitioner, rdd2)): Seq[Dependency[_]]) {
 
