@@ -135,19 +135,23 @@ class Ward() {
     })
   }
 
-  def matRowDist(M1 : Matrix, x : Int, M2 : Matrix, y : Int) : Double = {
+  def matRowDist(M1 : Matrix, i : Int, M2 : Matrix, j : Int) : Double = {
     assert(M1.numCols == M2.numCols)
     def square(x : Double) : Double = x * x
-    ((Array.tabulate (M1.numCols)) ((i : Int) => square(M1(x,i) - M2(x,i)))).sum
+    ((Array.tabulate (M1.numCols)) ((k : Int) => square(M1(i,k) - M2(j,k)))).sum
   }
 
   def kmin (k : Int) (distances : Seq[Double]) = {
+    println(distances)
     val S : collection.mutable.Set[(Double,Int)] = collection.mutable.Set()
     var max = (distances(0),0)
     (0 until distances.size).foreach((i : Int) => {
       val point = (distances(i),i)
-      if (point._1 < max._1) S -= max else Unit
       if (S.size < k) S += point else Unit
+      if (point._1 < max._1) {
+                              S -= max
+                              S += point}
+         else Unit
       max = if (! (S contains max)) S.max else max
     })
     S map (x => x._2)
