@@ -142,7 +142,6 @@ class Ward() {
   }
 
   def kmin (k : Int) (distances : Seq[Double]) = {
-    println(distances)
     val S : collection.mutable.Set[(Double,Int)] = collection.mutable.Set()
     var max = (distances(0),0)
     (0 until distances.size).foreach((i : Int) => {
