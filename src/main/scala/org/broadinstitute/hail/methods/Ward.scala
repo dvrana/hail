@@ -12,6 +12,11 @@ import org.apache.spark.mllib.linalg.Matrix
  *
  * Clustering n points on R^m takes roughly O(n^2 * m) to calculate the dist
  * matrix, plus O(n^2) for the clustering.
+ *
+ * Also contains meanJoin and knnJoin, which take a set of points and attempt
+ * to infer which clusters they most resemble, using either distance to the
+ * cluster mean or k nearest neighbors, respectively.  They break ties 
+ * arbitrarily.
  */
 
 class Ward() {
@@ -127,6 +132,35 @@ class Ward() {
     (Array.tabulate (newPoints.numRows)) ((i : Int) => {
       val distances = (Array.tabulate (means.length)) ((j : Int) => pointMeanDist(newPoints,i,means(j)))
       distances.zipWithIndex.min._2
+    })
+  }
+
+  def matRowDist(M1 : Matrix, x : Int, M2 : Matrix, y : Int) : Double = {
+    assert(M1.numCols == M2.numCols)
+    def square(x : Double) : Double = x * x
+    ((Array.tabulate (M1.numCols)) ((i : Int) => square(M1(x,i) - M2(x,i)))).sum
+  }
+
+  def kmin (k : Int) (distances : Seq[Double]) = {
+    val S : collection.mutable.Set[(Double,Int)] = collection.mutable.Set()
+    var max = (distances(0),0)
+    (0 until distances.size).foreach((i : Int) => {
+      val point = (distances(i),i)
+      if (point._1 < max._1) S -= max else Unit
+      if (S.size < k) S += point else Unit
+      max = if (! (S contains max)) S.max else max
+    })
+    S map (x => x._2)
+  }
+
+  def knnJoin(k : Int, points : Matrix, clusterAssign : Seq[Set[Int]], newPoints : Matrix) : Seq[Int] = {
+    assert(k > 0)
+    assert(k <= points.numRows)
+    (Array.tabulate (newPoints.numRows)) ((i : Int) => {
+      val distances = (Array.tabulate (points.numRows)) ((j : Int) => matRowDist(points,j,newPoints,i))
+      val mins = kmin(k)(distances)
+      val clustCounts = clusterAssign map ((x : Set[Int]) => ((x filter (i => mins contains i)).size))
+      clustCounts.zipWithIndex.max._2
     })
   }
 }
