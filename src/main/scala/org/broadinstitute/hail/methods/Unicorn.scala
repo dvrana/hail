@@ -131,7 +131,7 @@ class Unicorn() {
     (mean,variance)
   }
 
-  def nulldist(samples : cases, model : Seq[Stage1Dist]) : Map[Variant,(Double,Double)] = {
+  /*def nulldist(samples : cases, model : Seq[Stage1Dist]) : Map[Variant,(Double,Double)] = {
     val n = samples.size.toDouble
     val variants = model(0) mapValues (x => (0.0,0.0))
     val modelParam : Seq[Map[Variant,(Double,Double)]] = model map ((m : Stage1Dist) => m mapValues betaMeanVariance)
@@ -174,5 +174,5 @@ class Unicorn() {
     val stage1prior : Seq[Stage1Dist] = clusterWidePriors(data,clusts)
     // Stage 2 goes here!
     stage1prior
-  }
+  }*/
 }

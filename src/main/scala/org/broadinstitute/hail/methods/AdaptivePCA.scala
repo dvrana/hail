@@ -45,7 +45,7 @@ class AdaptivePCA(k : Int) {
     val (scores, None, Some(evalues)) = PCA(vds)
     val W = new Ward()
     val D_base = W.distMat(scores)
-    val D = D_base map ((S : Seq[Double]) => (S map Math.sqrt))
+    val D = D_base map ((S : Array[Double]) => (S map Math.sqrt))
     val clusts = W(D,2).toSeq
     /* Note- the next line is not good Hail style, it's forced by 
      * the fact that SamplePCA returns a plain 2d array w/o IDs
