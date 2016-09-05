@@ -8,7 +8,7 @@ import org.apache.spark.mllib.linalg.{Vector => SVector}
 import org.kohsuke.args4j.{Option => Args4jOption}
 import org.broadinstitute.hail.Utils._
 
-object AdaptivePCA extends Command {
+object AdaptivePCAcommand extends Command {
   def name = "adaptivepca"
 
   def description = "Use Adaptive PCA to cluster samples into homogenous groups"
@@ -36,9 +36,9 @@ object AdaptivePCA extends Command {
   def run(state: State, options: Options): State = {
 
     val vds = state.vds
-    val APCA = new AdaptivePCA(options.k)
+    val APCA = new AdaptivePCA(options.k,false)
     val T = APCA(vds,options.iterations)
-    val clusts = APCA.leaves(T).toSeq
+    val clusts = (APCA.leaves(T).toSeq) map (x => x._1)
 
     writeTextFile(options.output, state.hadoopConf) { s =>
       s.write("Sample\tCluster\n")

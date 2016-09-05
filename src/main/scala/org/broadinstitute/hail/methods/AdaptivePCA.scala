@@ -1,5 +1,9 @@
 package org.broadinstitute.hail.methods
 
+import org.apache.spark.rdd.RDD
+import org.broadinstitute.hail.variant._
+import org.broadinstitute.hail.variant.VariantDataset
+
 /* Implements adaptive PCA
  *
  * Adaptive PCA is a hierarchical clustering method for genotypes.  At each
@@ -18,9 +22,8 @@ package org.broadinstitute.hail.methods
  * binary trees aren't in Scala's standard library as far as I can tell.
  */
 
-import org.broadinstitute.hail.variant.VariantDataset
 
-class AdaptivePCA(k : Int) {
+class AdaptivePCA(k : Int, returnTree : Boolean) {
   def name = "AdaptivePCA"
     
   abstract class Tree[A]
@@ -34,15 +37,11 @@ class AdaptivePCA(k : Int) {
     }
   }
 
-  /*def stopcondition(evalues : Seq[Double]) : Boolean = {
-    ((evalues(0) + evalues(1)) / evalues.sum) > threshold
-  }*/
-
-  def apply (vds : VariantDataset, iterations : Int) : Tree[IndexedSeq[String]] = {
+  def apply (vds : VariantDataset, iterations : Int) : Tree[(IndexedSeq[String],Option[(Double,Double,RDD[(Variant, Array[Double])])])] = {
     val sampleIds = vds.sampleIds
-    if (vds.nSamples <= k | iterations == 0) Leaf(sampleIds) else {
-    val PCA = new SamplePCA(k,false,true)
-    val (scores, None, Some(evalues)) = PCA(vds)
+    if (vds.nSamples <= k | iterations == 0) Leaf(sampleIds,None) else {
+    val PCA = if (returnTree) new SamplePCA(k,true,true) else new SamplePCA(k,false,true)
+    val (scores, loadings, Some(evalues)) = PCA(vds)
     val W = new Ward()
     val D_base = W.distMat(scores)
     val D = D_base map ((S : Array[Double]) => (S map Math.sqrt))
@@ -53,6 +52,7 @@ class AdaptivePCA(k : Int) {
      */
     val idclusts = clusts map ((S : Set[Int]) => S map ((i : Int) => sampleIds(i)))
     def p (i : Int) (name : String, A : Any) : Boolean = idclusts(i) contains name
-    Node(apply(vds.filterSamples(p(0)),iterations-1),sampleIds,apply(vds.filterSamples(p(1)),iterations-1))
+    val thisNode = (sampleIds,if (returnTree) Some(0.0,0.0,loadings match { case Some(l) => l case None => null }) else None)
+    Node(apply(vds.filterSamples(p(0)),iterations-1),thisNode,apply(vds.filterSamples(p(1)),iterations-1))
   } }
 }
