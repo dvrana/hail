@@ -38,7 +38,7 @@ object AdaptivePCAcommand extends Command {
     val vds = state.vds
     val APCA = new AdaptivePCA(options.k,false)
     val T = APCA(vds,options.iterations)
-    val clusts = (APCA.leaves(T).toSeq) map (x => x._1)
+    val clusts = (APCA.leaves(T)) map (x => x._1)
 
     writeTextFile(options.output, state.hadoopConf) { s =>
       s.write("Sample\tCluster\n")

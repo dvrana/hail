@@ -43,6 +43,6 @@ class SamplePCA(k: Int, computeLoadings: Boolean, computeEigenvalues: Boolean) {
           Array.tabulate(k)((i : Int) => pos(i) + (loadings(v)(i) * gt.nNonRefAlleles.get)),
         (pos1 : Array[Double], pos2 : Array[Double]) => Array.tabulate(k)((i : Int) => pos1(i) + pos2(i))
     ))
-    scores.map( { case (s : String, a : Array[Double]) => (s,Array.tabulate(a.size)((i : Int) => a(i) * eig(i))) } )
+    scores.map( { case (s : String, a : Array[Double]) => (s,Array.tabulate(a.size)((i : Int) => a(i) * singular(i))) } )
   }
 }
