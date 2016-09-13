@@ -2,6 +2,7 @@ package org.broadinstitute.hail.methods
 
 import reflect.ClassTag
 import org.apache.spark.rdd.RDD
+import org.apache.spark.mllib.linalg.{Matrix, DenseMatrix}
 import org.broadinstitute.hail.variant._
 import org.broadinstitute.hail.variant.VariantDataset
 
@@ -38,7 +39,11 @@ class AdaptivePCA(k : Int, returnTree : Boolean) {
     }
   }
 
-  def apply (vds : VariantDataset, iterations : Int) : Tree[(IndexedSeq[String],Option[(Double,Double,Map[Variant, Array[Double]])])] = {
+  def rowsMean(scores : Matrix,cluster : Set[Int]) : Array[Double] = {
+    ((cluster map ((i : Int) => Array.tabulate(scores.numCols)((j : Int) => scores(i,j)))) reduceLeft ((x,y) => Array.tabulate(x.size)((i : Int) => x(i) + y(i) ))) map ((x : Double) => x / (scores.numRows.toDouble))
+  }
+
+  def apply (vds : VariantDataset, iterations : Int) : Tree[(IndexedSeq[String],Option[(Array[Double],Array[Double],Map[Variant, Array[Double]])])] = {
     val sampleIds = vds.sampleIds
     if (vds.nSamples <= k | iterations == 0) Leaf(sampleIds,None) else {
     val PCA = if (returnTree) new SamplePCA(k,true,true) else new SamplePCA(k,false,true)
@@ -48,13 +53,15 @@ class AdaptivePCA(k : Int, returnTree : Boolean) {
     val D_base = W.distMat(scores)
     val D = D_base map ((S : Array[Double]) => (S map Math.sqrt))
     val clusts = W(D,2).toSeq
+    val meanl = rowsMean(scores,clusts(0))
+    val meanr = rowsMean(scores,clusts(1))
     /* Note- the next line is not good Hail style, it's forced by 
      * the fact that SamplePCA returns a plain 2d array w/o IDs
      * attached.
      */
     val idclusts = clusts map ((S : Set[Int]) => S map ((i : Int) => sampleIds(i)))
     def p (i : Int) (name : String, A : Any) : Boolean = idclusts(i) contains name
-    val thisNode = (sampleIds,if (returnTree) Some(0.0,0.0,loadings) else None)
+    val thisNode = (sampleIds,if (returnTree) Some(meanl,meanr,loadings) else None)
     Node(apply(vds.filterSamples(p(0)),iterations-1),thisNode,apply(vds.filterSamples(p(1)),iterations-1))
   } }
 
