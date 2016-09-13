@@ -116,21 +116,15 @@ class Ward() {
     )  
   } 
  
-  def clustMean(M : Matrix, cluster : Set[Int]) : Array[Double] = {
-    val cpointmean = ((i : Int) => (cluster.foldLeft(0.0)) ((acc : Double, j : Int) => M(j,i) + acc) / cluster.size)
-    Array.tabulate (M.numCols) (cpointmean)
-  }
-
-  def pointMeanDist(points : Matrix, i : Int, mean : Array[Double]) : Double = {
+  def pointMeanDist(point : Array[Double], mean : Array[Double]) : Double = {
     def square(x : Double) : Double = x * x
-    ((Array.tabulate (mean.size)) ((j : Int) => square(points(i,j) - mean(j)))).sum
+    ((Array.tabulate (mean.size)) ((j : Int) => square(point(j) - mean(j)))).sum
   }
   
   // In case of a tie, precedence goes to the lower-numbered cluster
-  def meanJoin(points : Matrix, clusterAssign : Seq[Set[Int]], newPoints : Matrix) : Seq[Int] = {
-    val means = clusterAssign map ((c : Set[Int]) => clustMean(points,c))
-    (Array.tabulate (newPoints.numRows)) ((i : Int) => {
-      val distances = (Array.tabulate (means.length)) ((j : Int) => pointMeanDist(newPoints,i,means(j)))
+  def meanJoin(means : Array[Array[Double]], points : Array[Array[Double]]) : Seq[Int] = {
+    (Array.tabulate (points.size)) ((i : Int) => {
+      val distances = (Array.tabulate (means.length)) ((j : Int) => pointMeanDist(points(i),means(j)))
       distances.zipWithIndex.min._2
     })
   }

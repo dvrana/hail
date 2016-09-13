@@ -16,6 +16,8 @@ class WardSuite extends SparkSuite {
     // Matrices for distMat
     val M1 = Matrices.dense(3,3,Array(1.0,1.0,0.0,-1.0,0.0,-1.0,5.5,5.5,4.5)) // Yields D1
     val Mj1 = Matrices.dense(3,3,Array(1.0,10.0,0.0,-1.0,10.0,-1.0,5.3,10.0,4.5))
+    val A1 = Array(Array(1.0,-1.0,5.5),Array(1.0,0.0,5.5),Array(0.0,-1.0,4.5)) // M1 as an Array[Array[Double]]
+    val Aj1 = Array(Array(1.0,-1.0,5.3),Array(10.0,10.0,10.0),Array(0.0,-1.0,4.5))
    
     // Distance constructs for NN, RNN, and apply
     val D1 = Array(Array(1.0,2.0),Array(3.0)) // Trivial
@@ -122,16 +124,11 @@ class WardSuite extends SparkSuite {
     assert(clust2_2 contains Set(2,3))
 
     // Test meanJoin
-    val meanJoinMj1_1 = W.meanJoin(M1,Vector(Set(0),Set(1),Set(2)),Mj1)
-    val meanJoinMj1_2 = W.meanJoin(M1,Vector(Set(2),Set(1,0)),Mj1)
+    val meanJoinAj1_1 = W.meanJoin(A1,Aj1)
 
-    assert(meanJoinMj1_1(0) == 0)
-    assert(meanJoinMj1_1(1) == 1)
-    assert(meanJoinMj1_1(2) == 2)
-    
-    assert(meanJoinMj1_2(0) == 1)
-    assert(meanJoinMj1_2(1) == 1)
-    assert(meanJoinMj1_2(2) == 0)
+    assert(meanJoinAj1_1(0) == 0)
+    assert(meanJoinAj1_1(1) == 1)
+    assert(meanJoinAj1_1(2) == 2)
 
     // Test knnJoin
     val knnJoinMj1_1_1 = W.knnJoin(1,M1,Vector(Set(0),Set(1),Set(2)),Mj1)
