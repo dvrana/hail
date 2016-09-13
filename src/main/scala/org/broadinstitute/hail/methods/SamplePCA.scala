@@ -36,7 +36,7 @@ class SamplePCA(k: Int, computeLoadings: Boolean, computeEigenvalues: Boolean) {
   }
 
   // Projects samples into PC loadings
-  def project(vds : VariantDataset, loadings : Map[Variant, Array[Double]], eig : Array[Double]) : RDD[(String,Array[Double])] = {
+  def project(vds : VariantDataset, loadings : Map[Variant, Array[Double]], singular : Array[Double]) : RDD[(String,Array[Double])] = {
     val scores = (vds.filterVariants((v : Variant,_,_) => loadings contains v)
       .aggregateBySampleWithKeys(Array.fill[Double](k)(0.0))(
         (pos : Array[Double], v : Variant, _ : String, gt : Genotype) =>
