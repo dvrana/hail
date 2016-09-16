@@ -8,7 +8,7 @@ import org.apache.spark.mllib.linalg.{Vector => SVector}
 import org.kohsuke.args4j.{Option => Args4jOption}
 import org.broadinstitute.hail.Utils._
 
-object AdaptivePCAcommand extends Command {
+object APCA extends Command {
   def name = "adaptivepca"
 
   def description = "Use Adaptive PCA to cluster samples into homogenous groups"
