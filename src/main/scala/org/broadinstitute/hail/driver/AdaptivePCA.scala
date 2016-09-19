@@ -14,7 +14,7 @@ object APCA extends Command {
   def description = "Use Adaptive PCA to cluster samples into homogenous groups"
 
   class Options extends BaseOptions {
-    @Args4jOption(required = true, name = "-o", aliases = Array("--output"), usage = "Output file")
+    @Args4jOption(required = true, name = "-o", aliases = Array("--output"), usage = "Output file stem")
     var output : String = _
 
     @Args4jOption(required = true, name = "-i", aliases = Array("--iterations"), usage = "Number of AdaptivePCA iterations to complete before returning")
@@ -40,7 +40,7 @@ object APCA extends Command {
     val T = APCA(vds,options.iterations)
     val clusts = (APCA.leaves(T)) map (x => x._1)
 
-    writeTextFile(options.output, state.hadoopConf) { s =>
+    writeTextFile(options.output + ".cluster", state.hadoopConf) { s =>
       s.write("Sample\tCluster\n")
       for (i <- 0 until clusts.size) {
         for (j <- clusts(i))
