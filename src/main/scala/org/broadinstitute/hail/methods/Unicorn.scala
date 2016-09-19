@@ -2,6 +2,7 @@
 
 package org.broadinstitute.hail.methods
 
+import org.apache.spark.rdd.RDD
 import org.broadinstitute.hail.annotations._
 import org.broadinstitute.hail.expr._
 import org.broadinstitute.hail.variant._
@@ -31,18 +32,8 @@ class Unicorn() {
     }).copy(vaSignature=t2)
   }
 
-  val getP = (va : Annotation, qref : Querier, qalt : Querier) => {
-    val ref : Double = qref(va) match { case Some(x : Int) => x.toDouble 
-                               case _ => 0.0 }
-    val alt : Double = qalt(va) match { case Some(x : Int) => x.toDouble 
-                               case _ => 0.0 }
-    alt / Math.max(ref + alt,1.0)
-  }
-
-
   // Fst calc isn't parallelized- I found it a pretty nasty problem.  I'll swing back and touch it up when I don't have as much time pressure
-  def fstAnnotate(vds : VariantDataset, subpops : Seq[VariantDataset]) : VariantDataset = {
-    val (t,i) = vds.vaSignature.insert(TDouble,"Fst")
+  def fstcalc(vds : VariantDataset, subpops : Seq[VariantDataset]) : Map[Variant,Double] = {
     val (_,qglobref) = vds.queryVA("va.globalRefCount")
     val (_,qglobalt) = vds.queryVA("va.globalAltCount")
     val clusterGetters = subpops map (x => {
@@ -59,11 +50,8 @@ class Unicorn() {
       (ref, alt)
     }
     val clustcount = subpops.size
-    println("alpha")
     val subpoprefalt = (0 until clustcount) map {(i : Int) => ( (subpops(i)).variantsAndAnnotations.map( ((y : (Variant,Annotation)) => (y._1,getrefalt(y._2,clusterGetters(i)) )))).collectAsMap() }
-    println("beta")
     val globalrefalt : Map[Variant,(Double,Double)] = vds.variantsAndAnnotations.map {x : (Variant,Annotation) => (x._1,getrefalt(x._2,(qglobref,qglobalt)))}.collectAsMap().toMap
-    println("gamma")
     val fsts = (globalrefalt.keys map ( (v : Variant) => {
       val (gref,galt) = globalrefalt(v)
       val n = (galt + gref)
@@ -79,49 +67,40 @@ class Unicorn() {
       (v,if (totalVar <= 0.0) 1.0 else betweenVar / totalVar)
       })).toMap
 
-    println("delta")
-
-    vds.mapAnnotations((v : Variant, va : Annotation, _) => {
-      i(va,Some(fsts(v)))
-    }).copy(vaSignature=t)
+    fsts
   }
   
   // Calculates priors for Stage 1, then updates to get posteriors (a,b)
-  def calcHyperparams(vds : VariantDataset, fst : Map[Variant,Double]) : Stage1Dist = {
+  def calcHyperparams(vds : VariantDataset, fst : Map[Variant,Double]) : RDD[(Variant,(Double,Double))] = {
     val (_,qref) = vds.queryVA("va.refCount")
     val (_,qalt) = vds.queryVA("va.altCount")
     val (_,qglobref) = vds.queryVA("va.globalRefCount")
     val (_,qglobalt) = vds.queryVA("va.globalAltCount")
-    vds.mapWithAll ((v, va, _, _, _) => {
-      val p = getP(va,qglobref,qglobalt)
+    val temp = vds.variantsAndAnnotations.map(vVa => {
+      val (v,va) = vVa
+      val gref : Double = qglobref(va) match { case Some(x : Int) => x.toDouble 
+                                     case _ => 0.0 }
+      val galt : Double = qglobalt(va) match { case Some(x : Int) => x.toDouble 
+                                     case _ => 0.0 }
+      val p = galt / (gref + galt)
       val (a,b) = if (fst(v) == 0.0) (0.5,0.5) else (p * (1 - fst(v)) / fst(v), (1 - p) * (1 - fst(v)) / fst(v))
       val ref = qref(va) match { case Some(n : Int) => n
                                  case _ => 0 }
       val alt = qalt(va) match { case Some(n : Int) => n
                                  case _ => 0 }
       (v,(a + alt, b + ref))
-    }).collect().toMap
+    })
+    temp
   }
 
-  def clusterWidePriors(data : VariantDataset, clusts : Seq[Set[String]]) : Seq[Stage1Dist] = {
+  def clusterWidePriors(data : VariantDataset, clusts : Seq[Set[String]]) : Seq[RDD[(Variant,(Double,Double))]] = {
     var vds = alleleCountAnnotate(data,refName = "globalRefCount",altName = "globalAltCount")
     var subvds : Array[VariantDataset] = Array.tabulate(clusts.size)((i : Int) => vds.filterSamples((name : String, A : Annotation) => clusts(i) contains name) )
-    println("0")
     subvds = subvds map (g => alleleCountAnnotate(g))
-    println("1")
-    vds = fstAnnotate(vds,subvds)
-    
-    println("2")
+    val fst = fstcalc(vds,subvds)
 
-    val (_,qfst) = vds.queryVA("va.Fst")
-    val fst = ( vds.mapWithAll ((v, va, _, _, _) => qfst(va) match {
-      case Some(x : Double) => (v,x)
-      case _ => (v,0.0)
-      } ) ).collectAsMap().toMap
     
-    println("3")
-
-    var posteriors : Seq[Stage1Dist] = subvds map (x => calcHyperparams(x,fst))
+    var posteriors : Seq[RDD[(Variant,(Double,Double))]] = subvds map (x => calcHyperparams(x,fst))
     posteriors
   }
 
@@ -136,13 +115,6 @@ class Unicorn() {
     //     d
 
     Unit
-  }
-
-  def betaMeanVariance(beta : (Double, Double)) : (Double,Double) = {
-    val (a,b) = beta
-    val mean = a / (a + b)
-    val variance = (a * b) / ((a + b) * (a + b) * (a + b + 1))
-    (mean,variance)
   }
 
   /*def nulldist(samples : cases, model : Seq[Stage1Dist]) : Map[Variant,(Double,Double)] = {
@@ -184,9 +156,14 @@ class Unicorn() {
     } )).toMap
   }*/
 
-  def foal(data : VariantDataset, clusts : Seq[Set[String]]) : Seq[Stage1Dist] = {
-    val stage1prior : Seq[Stage1Dist] = clusterWidePriors(data,clusts)
-    println("4")
-    stage1prior map ((x : Stage1Dist) => x map ((y : (Variant,(Double,Double))) => (y._1,betaMeanVariance(y._2))))
+  def foal(data : VariantDataset, clusts : Seq[Set[String]]) : Seq[RDD[(Variant,(Double,Double))]] = {
+    val stage1prior : Seq[RDD[(Variant,(Double,Double))]] = clusterWidePriors(data,clusts)
+    stage1prior map (x => x map ((y : (Variant,(Double,Double))) => (y._1,
+      {
+        val (a,b) = y._2
+        val mean = a / (a + b)
+        val variance = (a * b) / ((a + b) * (a + b) * (a + b + 1))
+        (mean,variance)
+      })))
   }
 }
