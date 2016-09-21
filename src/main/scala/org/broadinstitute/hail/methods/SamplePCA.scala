@@ -36,13 +36,19 @@ class SamplePCA(k: Int, computeLoadings: Boolean, computeEigenvalues: Boolean) {
   }
 
   // Projects samples into PC loadings
-  def project(vds : VariantDataset, loadings : Map[Variant, Array[Double]], singular : Array[Double]) : RDD[(String,Array[Double])] = {
+  def project(vds : VariantDataset, loadings : Map[Variant, Array[Double]], singular : Array[Double]) : RDD[(String,Seq[Double])] = {
+    val localK = k
+    val genos = (g : Genotype) => g.nNonRefAlleles match {
+          case None => 0.0
+          case Some(n : Int) => n.toDouble
+        }
+
     val scores = (vds.filterVariants((v : Variant,_,_) => loadings contains v)
-      .aggregateBySampleWithKeys(Array.fill[Double](k)(0.0))(
-        (pos : Array[Double], v : Variant, _ : String, gt : Genotype) =>
-          Array.tabulate(k)((i : Int) => pos(i) + (loadings(v)(i) * gt.nNonRefAlleles.get)),
-        (pos1 : Array[Double], pos2 : Array[Double]) => Array.tabulate(k)((i : Int) => pos1(i) + pos2(i))
+      .aggregateBySampleWithKeys(Vector.fill[Double](localK)(0.0))(
+        (pos : Seq[Double], v : Variant, _ : String, gt : Genotype) =>
+          Vector.tabulate(localK)((i : Int) => pos(i) + (loadings(v)(i) * genos(gt))),
+        (pos1 : Seq[Double], pos2 : Seq[Double]) => Vector.tabulate(localK)((i : Int) => pos1(i) + pos2(i))
     ))
-    scores.map( { case (s : String, a : Array[Double]) => (s,Array.tabulate(a.size)((i : Int) => a(i) * singular(i))) } )
+    scores.map( { case (s : String, a : Vector[Double]) => (s,Vector.tabulate(a.size)((i : Int) => a(i) * singular(i))) } )
   }
 }

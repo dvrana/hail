@@ -43,7 +43,7 @@ class AdaptivePCA(k : Int, returnTree : Boolean) {
     ((cluster map ((i : Int) => Array.tabulate(scores.numCols)((j : Int) => scores(i,j)))) reduceLeft ((x,y) => Array.tabulate(x.size)((i : Int) => x(i) + y(i) ))) map ((x : Double) => x / (scores.numRows.toDouble))
   }
 
-  def apply (vds : VariantDataset, iterations : Int) : Tree[(IndexedSeq[String],Option[(Array[Double],Array[Double],Map[Variant, Array[Double]])])] = {
+  def apply (vds : VariantDataset, iterations : Int) : Tree[(IndexedSeq[String],Option[(Array[Double],Array[Double],Map[Variant, Array[Double]],Array[Double])])] = {
     val sampleIds = vds.sampleIds
     if (vds.nSamples <= k | iterations == 0) Leaf(sampleIds,None) else {
     val PCA = if (returnTree) new SamplePCA(k,true,true) else new SamplePCA(k,false,true)
@@ -61,7 +61,7 @@ class AdaptivePCA(k : Int, returnTree : Boolean) {
      */
     val idclusts = clusts map ((S : Set[Int]) => S map ((i : Int) => sampleIds(i)))
     def p (i : Int) (name : String, A : Any) : Boolean = idclusts(i) contains name
-    val thisNode = (sampleIds,if (returnTree) Some(meanl,meanr,loadings) else None)
+    val thisNode = (sampleIds,if (returnTree) Some(meanl,meanr,loadings,evalues) else None)
     Node(apply(vds.filterSamples(p(0)),iterations-1),thisNode,apply(vds.filterSamples(p(1)),iterations-1))
   } }
 
@@ -76,7 +76,7 @@ class AdaptivePCA(k : Int, returnTree : Boolean) {
         val w = new Ward()
         val svals = eigs map (Math.sqrt _)
         val points = pca.project(vds,loadings,svals).collect()
-        val assignments = w.meanJoin(Array(meanl,meanr),points map (x => x._2))
+        val assignments = w.meanJoin(Array(meanl,meanr),points map (x => x._2.toArray))
         val lids = (((assignments.zipWithIndex) filter ({ case (x,i) => x == 0})) map { case (_,i) => points(i)._1}).toSet
         val rids = (((assignments.zipWithIndex) filter ({ case (x,i) => x == 1})) map { case (_,i) => points(i)._1}).toSet
         def pl (name : String, A : Any) : Boolean = lids contains name

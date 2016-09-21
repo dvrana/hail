@@ -65,6 +65,7 @@ object ToplevelCommands {
   register(FilterSamples)
   register(FilterVariants)
   register(Foal)
+  register(Foaltest)
   register(GenDataset)
   register(Grep)
   register(GRM)

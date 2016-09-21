@@ -3,6 +3,7 @@
 package org.broadinstitute.hail.methods
 
 import org.apache.spark.rdd.RDD
+import org.apache.commons.math3.special.Gamma
 import org.broadinstitute.hail.annotations._
 import org.broadinstitute.hail.expr._
 import org.broadinstitute.hail.variant._
@@ -117,14 +118,13 @@ class Unicorn() {
     Unit
   }
 
-  /*def nulldist(samples : cases, model : Seq[Stage1Dist]) : Map[Variant,(Double,Double)] = {
+  def nulldist(samples : cases, model : Seq[Stage1Dist]) : Map[Variant,(Double,Double)] = {
     val n = samples.size.toDouble
     val variants = model(0) mapValues (x => (0.0,0.0))
-    val modelParam : Seq[Map[Variant,(Double,Double)]] = model map ((m : Stage1Dist) => m mapValues betaMeanVariance)
     val ybar = (samples foldLeft variants) ((acc,loc) => { 
       val (clust,(pc1,pc2)) = loc
       (acc.keys map ((k : Variant) => {
-         val (mean,variance) : (Double,Double) = modelParam(clust)(k)
+         val (mean,variance) : (Double,Double) = model(clust)(k)
          val (aggregatemean,aggregatevariance) = acc(k)
          val meanincrement = mean * 2 / n
          val varianceincrement = ( (2 * mean * (1 - mean)) + (2 * variance)) / (n * n)
@@ -133,28 +133,26 @@ class Unicorn() {
     ybar 
   }
   
-  def chisqtop(x : Double) : Double = Gamma.regularizedGammaQ(0.5, x / 2)
-
   // Assumes samples and vds describe the same dataset, and ref / alt alleles
   // are the same in the cases as in the UNICORN controls 
   // Assumes null dist is accurate and factors in missingness
-  def test(samples : cases, vds_samples : VariantDataset, nulldist : Map[Variant,(Double,Double)]) : Map[Variant,Option[Double]] = {
+  def test(samples : cases, vds_samples : VariantDataset, model : Seq[Map[Variant,(Double,Double)]]) : Map[Variant,Option[Double]] = {
+    val nullCounts = nulldist(samples,model)
     val vds = alleleCountAnnotate(vds_samples)
-    //val (_, refQuery) = vds.queryVA("va.refCount")
     val (_, altQuery) = vds.queryVA("va.altCount")
     val vam = vds.variantsAndAnnotations.collect().toMap
-    (vam.keys map ((v : Variant) => {
+    (vam.keys map ((v : Variant) => (v,{
       val va : Annotation = vam(v)
       val altCount = altQuery(va) match { case Some(n : Int) => n.toDouble
                                           case _ => 0.0 }
       val Y = altCount / samples.size
-      if (! (nulldist contains v)) None else Some ( {
-        val (Ybar,Ybarvar) = nulldist(v)
-        val chisq = (Y - Ybar) * (Y - Ybar) / Ybarvar
-        chisqtop(chisq)
+      if (! (nullCounts contains v)) None else Some ( {
+        val (ybar,ybarvar) = nullCounts(v)
+        val chisq = (Y - ybar) * (Y - ybar) / ybarvar
+        chisq
         } )
-    } )).toMap
-  }*/
+    }) )).toMap
+  }
 
   def foal(data : VariantDataset, clusts : Seq[Set[String]]) : Seq[RDD[(Variant,(Double,Double))]] = {
     val stage1prior : Seq[RDD[(Variant,(Double,Double))]] = clusterWidePriors(data,clusts)
