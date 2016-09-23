@@ -53,6 +53,7 @@ class Unicorn() {
     val clustcount = subpops.size
     val subpoprefalt = (0 until clustcount) map {(i : Int) => ( (subpops(i)).variantsAndAnnotations.map( ((y : (Variant,Annotation)) => (y._1,getrefalt(y._2,clusterGetters(i)) )))).collectAsMap() }
     val globalrefalt : Map[Variant,(Double,Double)] = vds.variantsAndAnnotations.map {x : (Variant,Annotation) => (x._1,getrefalt(x._2,(qglobref,qglobalt)))}.collectAsMap().toMap
+
     val fsts = (globalrefalt.keys map ( (v : Variant) => {
       val (gref,galt) = globalrefalt(v)
       val n = (galt + gref)
@@ -61,7 +62,10 @@ class Unicorn() {
       val betweenVar = ((0 until clustcount) map ((i : Int) => {
         val (ref,alt) = subpoprefalt(i)(v)
         val ni = (ref + alt)
-        val pi = alt / ni
+        val pi = alt / ni 
+        println(pi)
+        println((ni,n))
+        println((ref,alt))
         (ni / n) * (pi - p) * (pi - p)
       })).sum
 
@@ -95,7 +99,7 @@ class Unicorn() {
   }
 
   def clusterWidePriors(data : VariantDataset, clusts : Seq[Set[String]]) : Seq[RDD[(Variant,(Double,Double))]] = {
-    var vds = alleleCountAnnotate(data,refName = "globalRefCount",altName = "globalAltCount")
+    val vds = alleleCountAnnotate(data,refName = "globalRefCount",altName = "globalAltCount")
     var subvds : Array[VariantDataset] = Array.tabulate(clusts.size)((i : Int) => vds.filterSamples((name : String, A : Annotation) => clusts(i) contains name) )
     subvds = subvds map (g => alleleCountAnnotate(g))
     val fst = fstcalc(vds,subvds)
@@ -105,30 +109,19 @@ class Unicorn() {
     posteriors
   }
 
-  // Uses MCMC algorithm to compute posteriors on within-cluster GP
-  def fitGP(data : VariantDataset, priors : Seq[Stage1Dist]) : Unit = {
-    // Read in data & priors
-    // For each variant:
-    //   Generate Gaussian prior for allele frequency (Tracy 39-44)
-    //   Generate priors for phi
-    //   Make initial pull for phi and S
-    //   For each MCMC iteration (Tracy uses 6000):
-    //     d
-
-    Unit
-  }
-
+  // model should be a sequence of maps of variant => (mean,variance)
+  // returns expected alt allele count
   def nulldist(samples : cases, model : Seq[Stage1Dist]) : Map[Variant,(Double,Double)] = {
     val n = samples.size.toDouble
     val variants = model(0) mapValues (x => (0.0,0.0))
     val ybar = (samples foldLeft variants) ((acc,loc) => { 
       val (clust,(pc1,pc2)) = loc
-      (acc.keys map ((k : Variant) => {
-         val (mean,variance) : (Double,Double) = model(clust)(k)
-         val (aggregatemean,aggregatevariance) = acc(k)
-         val meanincrement = mean * 2 / n
-         val varianceincrement = ( (2 * mean * (1 - mean)) + (2 * variance)) / (n * n)
-         (k,(aggregatemean + meanincrement,aggregatevariance + varianceincrement)) } )).toMap 
+      (acc.keys map ((v : Variant) => {
+         val (mean,variance) : (Double,Double) = model(clust)(v)
+         val (aggregatemean,aggregatevariance) = acc(v)
+         val meanincrement = 2 * mean 
+         val varianceincrement = 2 * variance
+         (v,(aggregatemean + meanincrement,aggregatevariance + varianceincrement)) } )).toMap 
     } )
     ybar 
   }
@@ -140,12 +133,15 @@ class Unicorn() {
     val nullCounts = nulldist(samples,model)
     val vds = alleleCountAnnotate(vds_samples)
     val (_, altQuery) = vds.queryVA("va.altCount")
+    val (_, refQuery) = vds.queryVA("va.refCount")
     val vam = vds.variantsAndAnnotations.collect().toMap
     (vam.keys map ((v : Variant) => (v,{
       val va : Annotation = vam(v)
       val altCount = altQuery(va) match { case Some(n : Int) => n.toDouble
                                           case _ => 0.0 }
-      val Y = altCount / samples.size
+      val refCount = refQuery(va) match { case Some(n : Int) => n.toDouble
+                                          case _ => 0.0 }
+      val Y = 2 * altCount * vds.nSamples / (altCount + refCount)
       if (! (nullCounts contains v)) None else Some ( {
         val (ybar,ybarvar) = nullCounts(v)
         val chisq = (Y - ybar) * (Y - ybar) / ybarvar
